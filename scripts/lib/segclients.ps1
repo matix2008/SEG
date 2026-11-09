@@ -439,3 +439,127 @@ function Read-SegProfileMeta {
         GeneratedAt        = $generated
     }
 }
+
+function Get-SegProfileStatus {
+    <#
+        State of the generated profile of one client against the current seg-list.json and the connection
+        parameters of seg.env / servers.txt:
+          CURRENT   the profile was built from the current list and connection parameters
+          STALE     built from another list version or other connection parameters (Reasons tells which)
+          MISSING   no profile has been generated yet
+          BROKEN    the profile or its metadata is missing or unreadable
+          DISABLED  the client is disabled: no profile is needed
+        A stale list does not break a client: VPS2 applies the current seg-list on its own; a changed
+        connection parameter (address, port, REALITY keys, flow, fingerprint) does.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        $Client,
+
+        [Parameter(Mandatory = $true)]
+        $SegList,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Env,
+
+        [Parameter(Mandatory = $true)]
+        $Gateway
+    )
+
+    $paths = Get-SegProfilePaths -Root $Root -Name $Client.Name
+    $result = [pscustomobject]@{ Name = $Client.Name; State = 'CURRENT'; Reasons = @(); Profile = $paths.Profile; Meta = $paths.Meta }
+
+    if (-not $Client.Enabled) {
+        $result.State = 'DISABLED'
+        return $result
+    }
+
+    $hasProfile = Test-Path -LiteralPath $paths.Profile
+    $hasMeta = Test-Path -LiteralPath $paths.Meta
+
+    if (-not $hasProfile -and -not $hasMeta) {
+        $result.State = 'MISSING'
+        $result.Reasons = @('the profile has not been generated')
+        return $result
+    }
+
+    if (-not $hasProfile) {
+        $result.State = 'BROKEN'
+        $result.Reasons = @('the profile file is missing, only its metadata exists')
+        return $result
+    }
+
+    if (-not $hasMeta) {
+        $result.State = 'BROKEN'
+        $result.Reasons = @('the metadata file is missing: the version of the profile is unknown')
+        return $result
+    }
+
+    $meta = $null
+
+    try {
+        $meta = Read-SegProfileMeta -Path $paths.Meta
+    }
+    catch {
+        $result.State = 'BROKEN'
+        $result.Reasons = @($_.Exception.Message -replace '\s*\r?\n\s*', ' ')
+        return $result
+    }
+
+    $reasons = @()
+
+    if ($meta.SegListSha256 -ne $SegList.Sha256) {
+        $text = "seg-list.json changed (profile: version $($meta.SegListVersion), current: version $($SegList.Version))"
+
+        if ($meta.SegListVersion -eq $SegList.Version) {
+            $text += '; the content changed but the version did not: increase "version" in seg-list.json when you change the list'
+        }
+
+        $reasons += $text
+    }
+
+    $connection = Get-SegConnectionSha256 -Vps2Ip ([string]$Gateway.IP) -Port ([string]$Gateway.Port) -Env $Env
+
+    if ($meta.ServerConfigSha256 -ne $connection) {
+        $reasons += 'the connection parameters changed (address, port or REALITY/flow/fingerprint settings)'
+    }
+
+    if ($reasons.Count -gt 0) {
+        $result.State = 'STALE'
+        $result.Reasons = $reasons
+    }
+
+    return $result
+}
+
+function Get-SegProfileOrphans {
+    # Names of generated profiles (and metadata files) that no client record belongs to.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Clients
+    )
+
+    $dir = Get-SegGeneratedDir -Root $Root
+
+    if (-not (Test-Path -LiteralPath $dir)) {
+        return @()
+    }
+
+    $known = @($Clients | ForEach-Object { $_.Name.ToLowerInvariant() })
+
+    $names = @(
+        Get-ChildItem -LiteralPath $dir -Filter '*.json' -File |
+        ForEach-Object { $_.Name -replace '\.meta\.json$', '' -replace '\.json$', '' } |
+        Sort-Object -Unique |
+        Where-Object { $known -notcontains $_.ToLowerInvariant() }
+    )
+
+    return $names
+}

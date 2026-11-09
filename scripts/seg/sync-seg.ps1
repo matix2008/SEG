@@ -118,6 +118,27 @@ $Gateway = @($SegServers | Where-Object { $_.Role -eq 'seg-gateway' -and $_.IsEn
 $Exit    = @($SegServers | Where-Object { $_.Role -eq 'seg-exit' -and $_.IsEnabled })[0]
 $Nodes   = @($Gateway, $Exit)
 
+# Local client profiles against the current seg-list.json and connection parameters (read-only, never rewritten here).
+$ProfileProblems = 0
+
+foreach ($client in $SegClients) {
+    $status = Get-SegProfileStatus -Root $Root -Client $client -SegList $SegList -Env $SegEnv -Gateway $Gateway
+
+    switch ($status.State) {
+        'CURRENT' { Write-Log -Level 'OK' -Message "Client profile $($client.Name): current (seg-list version $($SegList.Version))." }
+        'DISABLED' { Write-Log -Level 'INFO' -Message "Client profile $($client.Name): the client is disabled." }
+        default {
+            $ProfileProblems++
+            Write-Log -Level 'WARN' -Message "Client profile $($client.Name): $($status.State) - $($status.Reasons -join '; '). Recreate it with make-client-config.ps1 -Mode SEG."
+        }
+    }
+}
+
+foreach ($orphan in @(Get-SegProfileOrphans -Root $Root -Clients $SegClients)) {
+    $ProfileProblems++
+    Write-Log -Level 'WARN' -Message "Generated profile $orphan has no client record in clients\seg: delete the files or recreate the client."
+}
+
 Write-Log -Level 'OK' -Message "servers.txt loaded: seg-gateway $($Gateway.Name) $($Gateway.IP):$($Gateway.Port), seg-exit $($Exit.Name) $($Exit.IP)."
 
 if (-not $ServerName) {
@@ -661,8 +682,8 @@ if ($failed.Count -gt 0) {
 if ($Check) {
     $open = @($Results | Where-Object { $_.Status -ne 'OK' })
 
-    if ($open.Count -gt 0) {
-        Write-Log -Level 'DONE' -Message "Check completed: the SEG pair is not confirmed as current ($($open.Count) node(s)). Nothing was changed. Log: $($script:LogFile)"
+    if ($open.Count -gt 0 -or $ProfileProblems -gt 0) {
+        Write-Log -Level 'DONE' -Message "Check completed: the SEG pair is not confirmed as current ($($open.Count) node(s)); client profiles needing attention: $ProfileProblems. Nothing was changed. Log: $($script:LogFile)"
         exit 2
     }
 
