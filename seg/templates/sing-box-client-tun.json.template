@@ -29,12 +29,12 @@
       "server": "{{VPS2_PUBLIC_IP}}",
       "server_port": {{SEG_VLESS_PORT}},
       "uuid": "{{SEG_CLIENT_UUID}}",
-      "flow": "xtls-rprx-vision",
+      "flow": "{{SEG_REALITY_FLOW}}",
       "packet_encoding": "xudp",
       "tls": {
         "enabled": true,
         "server_name": "{{SEG_REALITY_SERVER_NAME}}",
-        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "utls": { "enabled": true, "fingerprint": "{{SEG_REALITY_FINGERPRINT}}" },
         "reality": {
           "enabled": true,
           "public_key": "{{SEG_REALITY_PUBLIC_KEY}}",
