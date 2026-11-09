@@ -1,0 +1,9 @@
+# sing-box 1.14.4: SHA-256 of the official release packages and of the files inside the Windows package.
+# Release: https://github.com/SagerNet/sing-box/releases/tag/v1.14.4
+# Verified 2026-11-09: both packages match the digests published with the release; sing-box.exe and
+# libcronet.dll in tools\ are identical to the files inside the Windows package.
+# Format: <sha256>  <file name> (as in sha256sum). Scripts check files against these values before using them.
+699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968  sing-box-1.14.4-linux-amd64.tar.gz
+99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df  sing-box-1.14.4-windows-amd64.zip
+8f30682ee198855440d2a7fe070d5d3653793b2d01bb8c85eea88f93bbe7c8b9  sing-box.exe
+3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928  libcronet.dll

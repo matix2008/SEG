@@ -488,6 +488,11 @@ A-Z a-z 0-9 . _ -
 "@
 }
 
+# clients\generated\seg is used by SEG mode; a VPN client with this name would share the directory.
+if ($ClientName -ieq 'seg') {
+    throw "Client name 'seg' is reserved: clients\generated\seg belongs to SEG mode."
+}
+
 $ClientFile = Join-Path $ClientsDir "$ClientName.conf"
 
 if (Test-Path $ClientFile) {

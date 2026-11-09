@@ -346,6 +346,96 @@ function New-AwgHeaderValues {
     return $values
 }
 
+function Read-HashFile {
+    # Parses a sha256sum-style file ("<sha256>  <name>"); returns a hashtable name -> lowercase hash.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Hash file not found: $Path"
+    }
+
+    $result = @{}
+
+    foreach ($raw in Get-Content -LiteralPath $Path) {
+        $line = $raw.Trim()
+
+        if (-not $line -or $line.StartsWith('#')) {
+            continue
+        }
+
+        if ($line -notmatch '^([0-9a-fA-F]{64})\s+\*?(\S+)$') {
+            throw "Invalid line in $(Split-Path -Leaf $Path): $line"
+        }
+
+        $name = $Matches[2]
+
+        if ($result.ContainsKey($name)) {
+            throw "Duplicate entry in $(Split-Path -Leaf $Path): $name"
+        }
+
+        $result[$name] = $Matches[1].ToLowerInvariant()
+    }
+
+    return $result
+}
+
+function Assert-FileSha256 {
+    # Throws when the file does not exist, has no recorded hash, or does not match it.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Hashes,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Name
+    )
+
+    if (-not $Name) {
+        $Name = Split-Path -Leaf $Path
+    }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "File not found: $Path"
+    }
+
+    if (-not $Hashes.ContainsKey($Name)) {
+        throw "No recorded SHA-256 for $Name"
+    }
+
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    if ($actual -ne $Hashes[$Name]) {
+        throw "SHA-256 of $Path does not match the recorded value for $Name (expected $($Hashes[$Name]), actual $actual). Download the official package again."
+    }
+}
+
+function Get-VerifiedSingBoxLinuxPackage {
+    # Returns the path of the Linux package for VPS2 after checking it against seg\sing-box.sha256.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Version
+    )
+
+    $name = "sing-box-$Version-linux-amd64.tar.gz"
+    $path = Join-Path $Root "tools\$name"
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Linux package not found: $path. Download it from the official sing-box release v$Version into tools\."
+    }
+
+    Assert-FileSha256 -Path $path -Hashes (Read-HashFile -Path (Join-Path $Root 'seg\sing-box.sha256')) -Name $name
+
+    return $path
+}
+
 function Resolve-SingBoxExecutable {
     param(
         [Parameter(Mandatory = $true)]
@@ -360,6 +450,9 @@ function Resolve-SingBoxExecutable {
 
     if (Test-Path -LiteralPath $local) {
         $exe = $local
+
+        # The bundled executable must be the official one recorded in seg\sing-box.sha256.
+        Assert-FileSha256 -Path $local -Hashes (Read-HashFile -Path (Join-Path $Root 'seg\sing-box.sha256')) -Name 'sing-box.exe'
     }
     else {
         $command = Get-Command sing-box.exe -ErrorAction SilentlyContinue
