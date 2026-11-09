@@ -318,6 +318,16 @@ try {
             New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.service.template') -Values $templateValues -Directory $temp
         )
 
+        $backhaulInterface = $SegEnv['SEG_BACKHAUL_INTERFACE']
+        $backhaulMtu       = $SegEnv['SEG_BACKHAUL_MTU']
+
+        # The staged name is <interface>.conf: apply-seg.sh backhaul reads it by the interface name.
+        $backhaulGatewayFile = New-RenderedFile `
+            -TemplatePath (Join-Path $TemplatesDir 'awg-backhaul-vps2.conf.template') `
+            -Values $templateValues `
+            -Directory $temp `
+            -Name "$backhaulInterface.conf"
+
         $proceed = Invoke-PairStage -Title 'upgrade' -Action {
             param($node)
 
@@ -423,9 +433,29 @@ try {
             }
         }
 
+        # ----------------------------------------------------
+        # Step 9 (item 27): awg-backhaul on the gateway (apply-seg.sh backhaul)
+        # ----------------------------------------------------
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'backhaul-gateway' -Role 'seg-gateway' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($backhaulGatewayFile) -Destination '/root/.seg-sync/'
+
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh backhaul $backhaulInterface $backhaulMtu"
+
+                if ($result.Output -notmatch 'APPLY_SEG_OK stage=backhaul') {
+                    throw "apply-seg.sh did not report APPLY_SEG_OK for backhaul on $($node.Name)"
+                }
+
+                return $true
+            }
+        }
+
         if ($proceed) {
             foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed and routing completed; the remaining SEG stages are not implemented yet (roadmap items 16-20).'
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed, routing and the gateway backhaul completed; the remaining SEG stages are not implemented yet (roadmap items 17-20).'
             }
         }
     }

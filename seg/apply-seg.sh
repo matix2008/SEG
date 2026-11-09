@@ -44,7 +44,7 @@ log START "Script started."
 
 [[ "${EUID}" -eq 0 ]] || die "apply-seg.sh must be run as root"
 
-USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU>"
+USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 backhaul <BACKHAUL_INTERFACE> <BACKHAUL_MTU>"
 
 [[ $# -ge 1 ]] || die "$USAGE"
 
@@ -52,6 +52,7 @@ STAGE="$1"
 STAGING_DIR="/root/.seg-sync"
 BACKUP_DIR="$(mktemp -d /root/.seg-backup.XXXXXX)"
 ROLLBACK_ACTION=""
+CLEANUP_FILES=()
 
 on_exit()
 {
@@ -64,6 +65,11 @@ on_exit()
     fi
 
     rm -rf "$BACKUP_DIR"
+
+    if [[ "${#CLEANUP_FILES[@]}" -gt 0 ]]; then
+        rm -f "${CLEANUP_FILES[@]}"
+    fi
+
     exit "$exit_code"
 }
 
@@ -313,6 +319,138 @@ RP_EOF
     log OK "rp_filter is not strict for the backhaul (all=$all_value, interface=$interface_value, effective=$effective)."
 }
 
+# ------------------------------------------------------------
+# Stage backhaul (both roles, items 16 and 17)
+# ------------------------------------------------------------
+# Installs /etc/amnezia/amneziawg/<interface>.conf and keeps awg-quick@<interface> running with it.
+# The configuration holds the backhaul private key and the PSK: it is never printed.
+
+BH_INTERFACE=""
+BH_DST=""
+BH_WAS_ACTIVE=0
+BH_WAS_ENABLED=0
+
+bh_config_value()
+{
+    # bh_config_value <file> <key>: first value of "Key = value" (the [Interface] section comes first).
+    sed -nE "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*([^[:space:]#]+).*$/\1/p" "$1" | head -n1
+}
+
+backhaul_state_ok()
+{
+    # Compares the running interface with the installed configuration. Prints the first mismatch.
+    local file="$1" interface="$2" mtu="$3"
+    local address listen_port peer_key actual
+
+    ip link show "$interface" >/dev/null 2>&1 || { echo "interface $interface does not exist"; return 1; }
+
+    ip link show "$interface" | head -n1 | grep -Eq '<[^>]*\bUP\b' || { echo "interface $interface is not up"; return 1; }
+
+    actual="$(cat "/sys/class/net/${interface}/mtu")"
+    [[ "$actual" == "$mtu" ]] || { echo "MTU is $actual, expected $mtu"; return 1; }
+
+    address="$(bh_config_value "$file" Address)"
+    ip -4 addr show dev "$interface" | grep -Fq "inet ${address}" || { echo "address $address is not set"; return 1; }
+
+    listen_port="$(bh_config_value "$file" ListenPort)"
+
+    if [[ -n "$listen_port" ]]; then
+        actual="$(awg show "$interface" listen-port)"
+        [[ "$actual" == "$listen_port" ]] || { echo "listen port is $actual, expected $listen_port"; return 1; }
+    fi
+
+    peer_key="$(bh_config_value "$file" PublicKey)"
+    actual="$(awg show "$interface" peers)"
+    [[ "$actual" == "$peer_key" ]] || { echo "the peer public key differs from the configuration"; return 1; }
+
+    actual="$(ip -4 route show dev "$interface" | grep -vc 'proto kernel' || true)"
+    [[ "$actual" == "0" ]] || { echo "the interface holds routes besides its own subnet"; return 1; }
+
+    return 0
+}
+
+rollback_backhaul()
+{
+    restore_file "$BH_DST"
+
+    if [[ -f "$BH_DST" ]]; then
+        chmod 600 "$BH_DST"
+
+        if [[ "$BH_WAS_ACTIVE" == "1" ]]; then
+            systemctl restart "awg-quick@${BH_INTERFACE}.service" || true
+        fi
+    else
+        systemctl disable --now "awg-quick@${BH_INTERFACE}.service" >/dev/null 2>&1 || true
+        systemctl reset-failed "awg-quick@${BH_INTERFACE}.service" >/dev/null 2>&1 || true
+    fi
+}
+
+stage_backhaul()
+{
+    local interface="$1"
+    local mtu="$2"
+    local source="${STAGING_DIR}/${interface}.conf"
+    local unit="awg-quick@${interface}.service"
+
+    [[ "$interface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || die "Invalid backhaul interface: $interface"
+    [[ "$mtu" =~ ^[0-9]+$ ]] && (( mtu >= 576 && mtu <= 1500 )) || die "Invalid backhaul MTU: $mtu"
+
+    BH_INTERFACE="$interface"
+    BH_DST="/etc/amnezia/amneziawg/${interface}.conf"
+
+    [[ -f "$source" ]] || die "$source not found"
+
+    # The candidate is removed on any exit (see on_exit): it contains secrets.
+    CLEANUP_FILES+=("$source")
+
+    check_unresolved "$source"
+    log OK "No unresolved template variables found."
+
+    grep -Eq '^[[:space:]]*Table[[:space:]]*=[[:space:]]*off[[:space:]]*$' "$source" || die "The candidate must set Table = off"
+    ! grep -Eqi '^[[:space:]]*(PostUp|PostDown|PreUp|PreDown|DNS|SaveConfig)[[:space:]]*=' "$source" || \
+        die "The candidate must not contain PostUp, PostDown, PreUp, PreDown, DNS or SaveConfig"
+    [[ "$(bh_config_value "$source" MTU)" == "$mtu" ]] || die "MTU in the candidate differs from $mtu"
+
+    # awg-quick strip parses the configuration without touching the system.
+    awg-quick strip "$source" >/dev/null
+    log OK "Backhaul candidate parsed (awg-quick strip)."
+
+    systemctl is-active --quiet "$unit" && BH_WAS_ACTIVE=1 || true
+    systemctl is-enabled --quiet "$unit" 2>/dev/null && BH_WAS_ENABLED=1 || true
+
+    if same_file "$source" "$BH_DST" &&
+       [[ "$BH_WAS_ACTIVE" == "1" && "$BH_WAS_ENABLED" == "1" ]] &&
+       backhaul_state_ok "$BH_DST" "$interface" "$mtu" >/dev/null; then
+        log OK "Backhaul $interface is already current."
+        return 0
+    fi
+
+    backup_file "$BH_DST"
+    ROLLBACK_ACTION=rollback_backhaul
+
+    install -d -o root -g root -m 700 /etc/amnezia/amneziawg
+    install -o root -g root -m 600 "$source" "$BH_DST"
+    systemctl daemon-reload
+    systemctl enable "$unit" >/dev/null
+
+    # awg-quick has no reload: a changed configuration needs a restart of the interface.
+    if [[ "$BH_WAS_ACTIVE" == "1" ]]; then
+        log INFO "Restarting $unit."
+        systemctl restart "$unit"
+    else
+        systemctl start "$unit"
+    fi
+
+    systemctl is-active --quiet "$unit" || die "$unit is not active"
+
+    local problem
+    problem="$(backhaul_state_ok "$BH_DST" "$interface" "$mtu" || true)"
+    [[ -z "$problem" ]] || die "Backhaul check failed: $problem"
+
+    ROLLBACK_ACTION=""
+    log OK "Backhaul $interface installed and verified."
+}
+
 case "$STAGE" in
     failclosed)
         [[ $# -eq 1 ]] || die "$USAGE"
@@ -321,6 +459,10 @@ case "$STAGE" in
     routing)
         [[ $# -eq 3 ]] || die "$USAGE"
         stage_routing "$2" "$3"
+        ;;
+    backhaul)
+        [[ $# -eq 3 ]] || die "$USAGE"
+        stage_backhaul "$2" "$3"
         ;;
     *)
         die "Unknown stage: $STAGE. $USAGE"

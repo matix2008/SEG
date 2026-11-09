@@ -814,11 +814,17 @@ function New-RenderedFile {
         [hashtable]$Values,
 
         [Parameter(Mandatory = $true)]
-        [string]$Directory
+        [string]$Directory,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Name
     )
 
-    $name = [System.IO.Path]::GetFileName($TemplatePath) -replace '\.template$', ''
-    $path = Join-Path $Directory $name
+    if (-not $Name) {
+        $Name = [System.IO.Path]::GetFileName($TemplatePath) -replace '\.template$', ''
+    }
+
+    $path = Join-Path $Directory $Name
 
     try {
         Write-Utf8Lf -Path $path -Text (Convert-Template -Template (Get-Content -LiteralPath $TemplatePath -Raw) -Values $Values)
