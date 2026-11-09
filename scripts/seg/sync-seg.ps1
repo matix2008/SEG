@@ -356,6 +356,7 @@ try {
         $templateValues['SEG_REALITY_DEST_PORT'] = $destination.Substring($destination.LastIndexOf(':') + 1)
 
         $templateValues['SEG_VLESS_USERS_JSON'] = ConvertTo-SegVlessUsersJson -Clients $SegClients -Flow $SegEnv['SEG_REALITY_FLOW']
+        $templateValues['SEG_POLICY_RULES_JSON'] = Get-SegPolicyRulesJson -Policy $SegEnv['SEG_UNMATCHED_POLICY']
 
         $fragments = Get-SegRuleSetFragments -SegList $SegList
 

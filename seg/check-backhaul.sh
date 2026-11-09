@@ -227,6 +227,14 @@ PY
 fi
 
 # ------------------------------------------------------------
+# Unmatched-direct counter (information, never a failure): new connections of the insurance DIRECT.
+# A non-zero value means that clients send traffic to the gateway that is not in seg-list.
+# ------------------------------------------------------------
+
+unmatched="$(nft list counter inet seg_failclosed unmatched_direct 2>/dev/null | sed -nE 's/.*packets ([0-9]+) bytes.*/\1/p' | head -n1 || true)"
+echo "CHECK UNMATCHED_DIRECT=${unmatched:-UNKNOWN}"
+
+# ------------------------------------------------------------
 # Result
 # ------------------------------------------------------------
 

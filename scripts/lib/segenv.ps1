@@ -153,6 +153,21 @@ function Get-SegBackhaulMtuLimit {
     return $limit
 }
 
+function Get-SegPolicyRulesJson {
+    # The last server rule for traffic that is not in seg-list: nothing for 'direct' (the final outbound
+    # is direct), a catch-all reject for 'block'.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Policy
+    )
+
+    switch ($Policy) {
+        'direct' { return '' }
+        'block' { return ', { "action": "reject" }' }
+        default { throw "Unknown SEG_UNMATCHED_POLICY: $Policy" }
+    }
+}
+
 function Get-SegReservedNetworks {
     # Networks the backhaul network must not overlap: the default VPN client network and,
     # when config\server.env exists, its WG_IPV4_NETWORK. Requires Read-EnvFile from common.ps1.
