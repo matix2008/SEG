@@ -357,12 +357,14 @@ SEG_BACKHAUL_VPS2
 SEG_BACKHAUL_PORT
 SEG_BACKHAUL_INTERFACE
 SEG_BACKHAUL_MTU
+SEG_BACKHAUL_RANDOM_TRAILERS
 SEG_BACKHAUL_JC
 SEG_BACKHAUL_JMIN
 SEG_BACKHAUL_JMAX
 SEG_BACKHAUL_S1..S4
 SEG_BACKHAUL_H1..H4
 SEG_MARK
+SEG_UNMATCHED_MARK
 
 SEG_UNMATCHED_POLICY
 ```
@@ -371,10 +373,12 @@ SEG_UNMATCHED_POLICY
 
 ```text
 SEG_BACKHAUL_INTERFACE=awg-backhaul
+SEG_BACKHAUL_RANDOM_TRAILERS=on
+SEG_BACKHAUL_MTU=800    (при S4=144 и RandomTrailers=on; см. SEG.md, раздел 13)
 SEG_UNMATCHED_POLICY=direct   (допустимо: direct | block)
 ```
 
-`SEG_MARK` не совпадает с fwmark AmneziaWG, метками UFW и `awg-iptables`; проверяется при генерации.
+`SEG_MARK` и `SEG_UNMATCHED_MARK` различны и не совпадают с fwmark AmneziaWG, метками UFW и `awg-iptables`; проверяется при генерации. `SEG_UNMATCHED_MARK` получает direct outbound (счётчик `UNMATCHED_DIRECT`).
 
 Backhaul использует отдельные:
 
@@ -418,11 +422,11 @@ REALITY x25519 keypair генерируется локальным `sing-box`.
 
 UUID клиентов генерируются локально.
 
-Реализация: `-Mode SEG` вызывает ту же логику генерации AWG-параметров, backup и restore, что и режим VPN, с параметризацией по файлу (`seg.env`) и префиксу (`SEG_BACKHAUL_`). Дополнительно добавляются только REALITY-пара, PSK и UUID.
+Реализация: `-Mode SEG` вызывает ту же логику генерации AWG-параметров, backup и restore, что и режим VPN, с параметризацией по файлу (`seg.env`) и префиксу (`SEG_BACKHAUL_`). Дополнительно добавляются только REALITY-пара, PSK и UUID. `SEG_BACKHAUL_MTU` вычисляется из `S4` и `RandomTrailers` (при `S4 = 144` и `on` — 800, при `off` — не выше `1500 − 60 − S4`).
 
 Источник истины для секретов остаётся на ноутбуке.
 
-Скрипт проверяет наличие локального `sing-box 1.14.4` и завершается понятной ошибкой, если его нет.
+Скрипт проверяет наличие локального `sing-box 1.14.4` (`tools\sing-box.exe`) и завершается понятной ошибкой, если его нет.
 
 Обновить README: требования (локальный `sing-box`), описание `generate-server-env.ps1 -Mode`, правила backup, действия при компрометации (ротация REALITY, backhaul, UUID).
 
@@ -472,6 +476,15 @@ sing-box 1.14.4
 ```text
 sing-box 1.14.4
 ```
+
+Бинарники лежат в `tools\` (каталог в `.gitignore`): `tools\sing-box.exe` и `libcronet.dll` для клиента и локальных проверок, `tools\sing-box-1.14.4-linux-amd64.tar.gz` для VPS2. В репозитории фиксируются SHA-256 официальных пакетов релиза `v1.14.4`:
+
+```text
+sing-box-1.14.4-linux-amd64.tar.gz   699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+sing-box-1.14.4-windows-amd64.zip    99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df
+```
+
+Хэши хранятся в `seg\sing-box.sha256`; скрипты сверяют ими файлы перед использованием.
 
 Hiddify не входит в обязательные критерии приёмки первой версии.
 
@@ -545,8 +558,10 @@ DNS
 Для DIRECT-доменов:
 
 ```text
-DNS → local/direct resolver клиента
+DNS → прямой DoH/DoT-резолвер клиента (не UDP/TCP 53)
 ```
+
+На Windows при `strict_route` порт 53 через любые интерфейсы, кроме TUN, блокируется, в том числе для самого `sing-box` (SEG.md, раздел 8).
 
 На VPS2 разрешить служебный маршрут:
 
@@ -653,21 +668,28 @@ VPS1 = Role seg-exit
 
 ```text
 SEG + seg-gateway (sing-box + backhaul amnezia)
-SEG + seg-exit (клиент backhaul amnezia)
+SEG + seg-exit (клиент backhaul amnezia, Type = amnezia)
 ```
 
-Для `seg-exit` (клиент backhaul amnezia):
-
-```text
-SEG + seg-exit (Type = amnezia)
-```
-
-не создавать клиентский VPN-интерфейс `awg0`.
+Для `seg-exit` не создавать клиентский VPN-интерфейс `awg0`.
 
 Создаётся только:
 
 ```text
 awg-backhaul
+```
+
+Роль-зависимая настройка (по прототипу, `SEG.md`, разделы 14–18):
+
+```text
+seg-gateway
+  → установка sing-box из локально проверенного пакета (пользователь sing-box,
+    CAP_NET_ADMIN, CAP_NET_BIND_SERVICE), fail-closed, awg-backhaul.
+
+seg-exit
+  → unbound на backhaul-IP (с unbound-anchor и root.key), ip_forward,
+    таблицы nftables seg_exit и seg_exit_nat, seg-exit-keepalive,
+    awg-backhaul.
 ```
 
 `secure-seg.sh` различает роли:
@@ -680,7 +702,11 @@ seg-gateway
 
 seg-exit
   → SSH;
-  → входящие сервисные порты не открываются.
+  → входящие сервисные порты наружу не открываются;
+  → из awg-backhaul: DNS (tcp и udp 53) только от VPS2_BACKHAUL_IP к
+    VPS1_BACKHAUL_IP и маршрут (ufw route allow) от VPS2_BACKHAUL_IP во
+    внешний интерфейс. Без этих правил UFW блокирует DNS и пересылку
+    независимо от таблицы seg_exit (SEG.md, раздел 18).
 ```
 
 Отдельные скрипты создаются для SEG (по роли внутри), а не для каждого сочетания режим/роль; общие блоки не дублируются между SEG-скриптами.
@@ -740,8 +766,8 @@ main default
 
 Дополнительно:
 
-- задать `rp_filter` (loose или отключён) для `awg-backhaul`, чтобы ответы из backhaul не отбрасывались;
-- задать MTU `awg-backhaul` (`SEG_BACKHAUL_MTU`) и MSS clamp.
+- проверить `rp_filter` для `awg-backhaul` (loose или отключён, не `1`); на Ubuntu 24.04 уже `2`;
+- задать MTU `awg-backhaul` (`SEG_BACKHAUL_MTU`); MSS clamp не требуется (MSS выводится из MTU интерфейса, к которому привязан сокет).
 
 ### Пункт 16. Реализовать backhaul на VPS2
 
@@ -780,6 +806,7 @@ VPS1:
 
 - инициирует `awg-backhaul`;
 - использует `PersistentKeepalive`;
+- `seg-exit-keepalive.service` (`ping -i 5` на `VPS2_BACKHAUL_IP`, `PartOf` backhaul): без него после перезапуска backhaul на VPS2 туннель восстанавливается до ~3 минут вместо ~19 секунд;
 - выполняет forwarding;
 - выполняет NAT;
 - запускает DNS resolver на backhaul-IP;
@@ -846,9 +873,9 @@ sing-box 1.14.4
 
 Пакет скачивается на ноутбук, проверяется по SHA-256 (хэш фиксируется в репозитории) и копируется на VPS2; загрузка с GitHub на VPS2 не используется.
 
-Перед отправкой каждая сгенерированная конфигурация проверяется локально командой `sing-box check`.
+Перед отправкой каждая сгенерированная конфигурация проверяется командой `sing-box check`: клиентская — локальным Windows-бинарником, серверная — Linux-бинарником на VPS2 как candidate-файл до замены рабочего (Windows-сборка отклоняет серверный `routing_mark`).
 
-Конфигурация формируется из шаблона `{{VAR}}` (механизм `Convert-Template` с проверкой «Unresolved variables»), полученного из прототипа (пункт 0).
+Конфигурация формируется из шаблона `{{VAR}}` (`seg\templates\`, механизм `Convert-Template` с проверкой «Unresolved variables»), полученного из прототипа (пункт 0).
 
 Настроить:
 
@@ -906,7 +933,7 @@ VPS2_BACKHAUL_IP
 
 Страховочный DIRECT:
 
-- не получает `SEG_MARK` и не использует `awg-backhaul`;
+- не получает `SEG_MARK` и не использует `awg-backhaul`; получает отдельную метку `SEG_UNMATCHED_MARK`, по которой nftables считает новые соединения;
 - блокирует исходящий tcp/25;
 - ведёт счётчик unmatched-соединений без содержимого и имён;
 - счётчик отображается в `-Check` как `UNMATCHED_DIRECT`.
@@ -940,14 +967,18 @@ VLESS destination = domain
 
 Для IP-подключений использовать CIDR.
 
-Selected DNS направлять через SEG.
+Selected DNS направлять через SEG (FakeIP для доменов `seg-list`).
 
-DIRECT DNS оставлять локальным.
+DIRECT DNS — прямой DoH/DoT (не порт 53, см. пункт 10).
 
 Профиль:
 
 - содержит `route.auto_detect_interface`, чтобы соединение с VPS2 не попадало в собственный TUN;
+- использует `strict_route` и `hijack-dns`; `seg-list` задаётся одним inline `rule_set`;
+- QUIC (UDP/443) к `seg-list` отклоняется, чтобы браузер перешёл на TCP;
 - не перехватывает управляющий трафик (SSH к VPS): адреса VPS не входят в `seg-list`.
+
+Клиент SEG несовместим с активным full-tunnel клиентом AmneziaWG (kill-switch): на время работы SEG-клиента тот отключается.
 
 Обновить README: клиентская схема, установка клиента, ограничения.
 
@@ -979,8 +1010,9 @@ segListSha256
 -Mode SEG
   → создать UUID;
   → создать clients/seg/<client>.json;
-  → обновить users sing-box;
   → сформировать профиль.
+
+Конфигурация users sing-box на VPS2 формируется из `clients/seg/*.json` и применяется при `sync-servers.ps1 -Mode SEG all` (как и в режиме VPN, `add-client.ps1` VPS не затрагивает).
 ```
 
 Реализация: `-Mode SEG` выполняется в `scripts\seg\add-client.ps1`; VPN-код не изменяется.
@@ -1031,7 +1063,8 @@ segListSha256
 - fingerprint;
 - `seg-list` rule_set;
 - FakeIP;
-- DNS routing;
+- DNS routing (selected → FakeIP, прямой DNS по DoH/DoT);
+- QUIC reject для `seg-list`;
 - DIRECT route.
 
 Обновить README: описание `make-client-config.ps1 -Mode`, импорт профиля в клиент.
@@ -1060,7 +1093,7 @@ GATEWAY=READY
 EXIT=READY
 BACKHAUL=UP
 HANDSHAKE=FRESH
-POLICY_ROUTING=OK
+SELECTED_ROUTING=OK
 BACKHAUL_DNS=OK
 EGRESS_IP=<VPS1-IP>
 FAIL_CLOSED=OK
@@ -1108,8 +1141,7 @@ SECURITY=OK
 Перед применением сохранять:
 
 - backhaul configs;
-- nftables rules;
-- правила nftables fail-closed;
+- nftables rules (fail-closed и exit);
 - sing-box config;
 - systemd units.
 
@@ -1199,9 +1231,9 @@ VPS1 = seg-exit (Type = amnezia)
 - UDP `SEG_BACKHAUL_PORT` на VPS2 доступен только с IP VPS1;
 - входящие сервисные порты VPS1 закрыты;
 - `rp_filter` не отбрасывает ответы из backhaul;
-- MTU и MSS: передача больших объёмов данных;
+- MTU: передача больших объёмов данных без фрагментации внешних пакетов (счётчики `IpFragCreates` и `IpReasmOKs` не растут при `RandomTrailers = on` и `SEG_BACKHAUL_MTU`);
 - VPS1 инициирует handshake;
-- reconnect;
+- reconnect после перезапуска backhaul на VPS2 (около 20 секунд, `seg-exit-keepalive`);
 - отсутствие `awg0` на SEG exit;
 - NAT VPS1;
 - DNS resolver VPS1;
@@ -1408,11 +1440,12 @@ backhaul DOWN
 | 11–14 VPS2, страховочный DIRECT, маршрутизация selected-трафика, fail-closed | роль `seg-gateway`, `SEG_UNMATCHED_POLICY`, `ufw reload` |
 | 15–18 VPS1, backhaul, безопасность | роль `seg-exit`, backhaul |
 | 19–20 REALITY, UUID | ключи, клиенты, отзыв |
-| 22 IPv6 | ограничения и включение |
+| 22 IPv6 | ограничения и включение (в т.ч. MTU backhaul) |
 | 23 `-Check` | расшифровка полей, `UNMATCHED_DIRECT` |
 | 24 порядок развёртывания | порядок, rollback |
 | 25 риски | риски и ограничения |
 | 27 структура реализации | расположение скриптов и шаблонов SEG |
+| 28 результаты прототипа | отклонения, влияющие на эксплуатацию: MTU, DoH на клиенте, keepalive, правила UFW |
 
 Дополнительно проверить, что в README обновлены:
 
