@@ -53,15 +53,7 @@ Write-Log -Level 'INFO' -Message "PowerShell version: $($PSVersionTable.PSVersio
 # ============================================================
 
 # The backhaul network must not overlap the VPN client network.
-$ReservedNetworks = @('10.7.0.0/24')
-
-if (Test-Path -LiteralPath $VpnEnvFile) {
-    $vpnNetwork = (Read-EnvFile -Path $VpnEnvFile)['WG_IPV4_NETWORK']
-
-    if ($vpnNetwork -and $vpnNetwork -notin $ReservedNetworks) {
-        $ReservedNetworks += $vpnNetwork
-    }
-}
+$ReservedNetworks = @(Get-SegReservedNetworks -VpnEnvFile $VpnEnvFile)
 
 function Test-SegEnvFile {
     # Returns $null when the file is a valid seg.env, otherwise the problem text.

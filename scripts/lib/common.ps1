@@ -484,6 +484,419 @@ function Resolve-SingBoxExecutable {
 }
 
 # ============================================================
+# Remote nodes: SSH, copy, reboot, upgrade
+# Every connection uses BatchMode and StrictHostKeyChecking=yes: the host key of a node must be
+# verified and stored in known_hosts by the user beforehand (README, section 5).
+# ============================================================
+
+function Write-LogOutput {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return
+    }
+
+    foreach ($line in ($Text -split '\r\n|\n|\r')) {
+        if ($line.Length -eq 0) {
+            continue
+        }
+
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $record = "$timestamp [$Source] [$($script:RunId)] [OUTPUT] $line"
+
+        [System.IO.File]::AppendAllText($script:LogFile, $record + "`n", $script:LogEncoding)
+
+        Microsoft.PowerShell.Utility\Write-Host $record
+    }
+}
+
+function Get-ErrorDescription {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $message = [string]$ErrorRecord.Exception.Message
+
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = ($ErrorRecord | Out-String).Trim()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = [string]$ErrorRecord.FullyQualifiedErrorId
+    }
+
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = 'Unknown PowerShell error.'
+    }
+
+    return $message
+}
+
+function Test-Ssh {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP,
+
+        [switch]$Quiet
+    )
+
+    $TimeoutMs = 15000
+
+    if (-not $Quiet) {
+        Write-Log -Level 'INFO' -Message "Testing SSH connection: root@$IP (hard timeout $($TimeoutMs / 1000)s)"
+    }
+
+    $sshCommand = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if (-not $sshCommand) {
+        $sshCommand = Get-Command ssh -ErrorAction SilentlyContinue
+    }
+
+    if (-not $sshCommand) {
+        if (-not $Quiet) {
+            Write-Log -Level 'ERROR' -Message 'ssh.exe was not found in PATH.'
+        }
+        return $false
+    }
+
+    $process = $null
+
+    try {
+        # System.Diagnostics.Process is used directly: Windows PowerShell 5.1 can return an empty
+        # ExitCode from Start-Process -PassThru with redirected native-process streams.
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $sshCommand.Source
+        $psi.Arguments = "-n -o BatchMode=yes -o ConnectionAttempts=1 -o ConnectTimeout=7 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -o StrictHostKeyChecking=yes root@$IP true"
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $psi
+
+        if (-not $process.Start()) {
+            if (-not $Quiet) {
+                Write-Log -Level 'ERROR' -Message "SSH probe process could not be started: root@$IP"
+            }
+            return $false
+        }
+
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            try {
+                $process.Kill()
+                $process.WaitForExit()
+            }
+            catch {
+                # Best effort only; the timeout is already the primary result.
+            }
+
+            $stdoutText = $process.StandardOutput.ReadToEnd()
+            $stderrText = $process.StandardError.ReadToEnd()
+
+            if (-not $Quiet) {
+                Write-LogOutput -Source "ssh:$IP" -Text $stdoutText
+                Write-LogOutput -Source "ssh:$IP" -Text $stderrText
+                Write-Log -Level 'WARN' -Message "SSH probe timed out after $($TimeoutMs / 1000)s: root@$IP"
+            }
+
+            return $false
+        }
+
+        # Flush the redirected streams before reading them and ExitCode.
+        $process.WaitForExit()
+        $stdoutText = $process.StandardOutput.ReadToEnd()
+        $stderrText = $process.StandardError.ReadToEnd()
+        $code = [int]$process.ExitCode
+
+        if (-not $Quiet) {
+            Write-LogOutput -Source "ssh:$IP" -Text $stdoutText
+            Write-LogOutput -Source "ssh:$IP" -Text $stderrText
+        }
+
+        if ($code -eq 0) {
+            if (-not $Quiet) {
+                Write-Log -Level 'OK' -Message "SSH connection established: root@$IP (exit 0)"
+            }
+            return $true
+        }
+
+        if (-not $Quiet) {
+            Write-Log -Level 'WARN' -Message "SSH connection failed: root@$IP (exit $code)"
+        }
+
+        return $false
+    }
+    catch {
+        if (-not $Quiet) {
+            Write-Log -Level 'ERROR' -Message "SSH probe failed to execute for root@${IP}: $($_.Exception.Message)"
+        }
+        return $false
+    }
+    finally {
+        if ($process) {
+            $process.Dispose()
+        }
+    }
+}
+
+function Invoke-Remote {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+
+        [switch]$AllowFailure,
+
+        [switch]$Quiet
+    )
+
+    if (-not $Quiet) {
+        Write-Log -Level 'INFO' -Message "Executing remote command on root@$IP"
+    }
+
+    # CRLF must not leak into the remote bash.
+    $Command = $Command -replace "`r`n", "`n"
+    $Command = $Command -replace "`r", "`n"
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $previousErrorActionPreference = $ErrorActionPreference
+
+    try {
+        # stderr of ssh.exe is diagnostic output, not a PowerShell exception: the exit code decides.
+        $ErrorActionPreference = 'Continue'
+
+        & ssh `
+            -n `
+            -o BatchMode=yes `
+            -o ConnectionAttempts=1 `
+            -o ConnectTimeout=15 `
+            -o ServerAliveInterval=15 `
+            -o ServerAliveCountMax=3 `
+            -o StrictHostKeyChecking=yes `
+            "root@$IP" `
+            $Command `
+            2>&1 |
+        ForEach-Object {
+            $line = [string]$_
+            [void]$lines.Add($line)
+
+            if (-not $Quiet) {
+                Write-LogOutput -Source "remote:$IP" -Text $line
+            }
+        }
+
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    $text = ($lines -join "`n")
+
+    if ($code -eq 0) {
+        if (-not $Quiet) {
+            Write-Log -Level 'OK' -Message "Remote command completed on $IP"
+        }
+    }
+    elseif ($AllowFailure) {
+        if (-not $Quiet) {
+            Write-Log -Level 'WARN' -Message "Remote command returned exit code $code on $IP"
+        }
+    }
+    else {
+        Write-Log -Level 'ERROR' -Message "Remote command failed on $IP with exit code $code"
+        throw "Remote command failed on $IP with exit code $code"
+    }
+
+    return [PSCustomObject]@{
+        Code   = $code
+        Output = $text
+    }
+}
+
+function Copy-ToServer {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Files,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Destination = '/root/'
+    )
+
+    $fileNames = @($Files | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+    Write-Log -Level 'INFO' -Message "Copying to root@${IP}:${Destination}: $($fileNames -join ', ')"
+
+    $scpArgs = @(
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectionAttempts=1',
+        '-o', 'ConnectTimeout=15',
+        '-o', 'ServerAliveInterval=15',
+        '-o', 'ServerAliveCountMax=3',
+        '-o', 'StrictHostKeyChecking=yes'
+    )
+
+    $scpArgs += $Files
+    $scpArgs += "root@${IP}:${Destination}"
+
+    $previousErrorActionPreference = $ErrorActionPreference
+
+    try {
+        $ErrorActionPreference = 'Continue'
+
+        & scp @scpArgs 2>&1 |
+        ForEach-Object {
+            Write-LogOutput -Source "scp:$IP" -Text ([string]$_)
+        }
+
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($code -ne 0) {
+        Write-Log -Level 'ERROR' -Message "SCP failed: $IP (exit $code)"
+        throw "SCP failed: $IP (exit $code)"
+    }
+
+    Write-Log -Level 'OK' -Message "Files copied successfully to ${IP}:$Destination"
+}
+
+function New-LinuxCopy {
+    # Writes an LF-only copy of a script or template into the temporary directory.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TempDirectory
+    )
+
+    $destination = Join-Path $TempDirectory ([System.IO.Path]::GetFileName($Source))
+
+    Write-Utf8Lf -Path $destination -Text (Get-Content -LiteralPath $Source -Raw)
+
+    Write-Log -Level 'INFO' -Message "Prepared LF copy: $([System.IO.Path]::GetFileName($Source))"
+    return $destination
+}
+
+function Wait-SshAfterReboot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP
+    )
+
+    Write-Log -Level 'INFO' -Message "Waiting for reboot cycle: $IP"
+    Start-Sleep -Seconds 3
+
+    # First wait until the old SSH session goes away.
+    for ($i = 0; $i -lt 20; $i++) {
+        if (-not (Test-Ssh -IP $IP -Quiet)) {
+            Write-Log -Level 'INFO' -Message "SSH went down during reboot: $IP"
+            break
+        }
+
+        Start-Sleep -Seconds 2
+    }
+
+    # Then wait until SSH returns.
+    for ($i = 0; $i -lt 60; $i++) {
+        if (Test-Ssh -IP $IP -Quiet) {
+            Write-Log -Level 'OK' -Message "SSH restored after reboot: $IP"
+            return
+        }
+
+        Start-Sleep -Seconds 5
+    }
+
+    throw "SSH did not return after reboot: $IP"
+}
+
+function Invoke-UpgradeStage {
+    # Runs /root/upgrade.sh (already copied) until UPGRADE_OK, rebooting after confirmation when it asks to.
+    # Returns $false when the user declined the reboot.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP
+    )
+
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+
+        Write-Log -Level 'START' -Message "UPGRADE stage on $IP (attempt $attempt/4)"
+
+        $command = @'
+chmod +x /root/upgrade.sh
+/root/upgrade.sh
+'@
+
+        $result = Invoke-Remote -IP $IP -Command $command -AllowFailure
+
+        if ($result.Code -eq 0) {
+            Write-Log -Level 'OK' -Message "Upgrade completed successfully on $IP"
+            return $true
+        }
+
+        if ($result.Code -eq 255) {
+            # ssh.exe failed or the connection dropped mid-upgrade. upgrade.sh is idempotent and repairs
+            # an interrupted dpkg state, so wait for SSH and run it again.
+            Write-Log -Level 'WARN' -Message "SSH connection lost during upgrade on $IP; waiting for SSH to retry."
+
+            $restored = $false
+            for ($i = 0; $i -lt 30; $i++) {
+                if (Test-Ssh -IP $IP -Quiet) {
+                    $restored = $true
+                    break
+                }
+
+                Start-Sleep -Seconds 10
+            }
+
+            if (-not $restored) {
+                throw "SSH did not return after connection loss during upgrade on $IP"
+            }
+
+            Write-Log -Level 'OK' -Message "SSH restored on $IP; retrying upgrade."
+            continue
+        }
+
+        if ($result.Code -ne 10) {
+            throw "upgrade.sh failed with code $($result.Code) on $IP"
+        }
+
+        Write-Log -Level 'WARN' -Message "upgrade.sh requires reboot on $IP"
+
+        if (-not (Confirm-Action "Reboot $IP and continue the upgrade?")) {
+            Write-Log -Level 'WARN' -Message "Configuration stopped after upgrade stage on $IP"
+            return $false
+        }
+
+        $rebootCommand = @'
+nohup bash -c 'sleep 1; reboot' >/dev/null 2>&1 &
+exit 0
+'@
+
+        Invoke-Remote -IP $IP -Command $rebootCommand -AllowFailure | Out-Null
+
+        Wait-SshAfterReboot -IP $IP
+    }
+
+    throw "upgrade.sh did not reach UPGRADE_OK after repeated runs on $IP"
+}
+
+# ============================================================
 # Env file backups (parameterized by file)
 # ============================================================
 

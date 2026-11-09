@@ -150,6 +150,27 @@ function Get-SegBackhaulMtuLimit {
     return $limit
 }
 
+function Get-SegReservedNetworks {
+    # Networks the backhaul network must not overlap: the default VPN client network and,
+    # when config\server.env exists, its WG_IPV4_NETWORK. Requires Read-EnvFile from common.ps1.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VpnEnvFile
+    )
+
+    $networks = @('10.7.0.0/24')
+
+    if (Test-Path -LiteralPath $VpnEnvFile) {
+        $vpnNetwork = (Read-EnvFile -Path $VpnEnvFile)['WG_IPV4_NETWORK']
+
+        if ($vpnNetwork -and $vpnNetwork -notin $networks) {
+            $networks += $vpnNetwork
+        }
+    }
+
+    return $networks
+}
+
 function Test-SegEnvironment {
     <#
         Validates the parsed seg.env. Collects all problems and throws one error listing them.
