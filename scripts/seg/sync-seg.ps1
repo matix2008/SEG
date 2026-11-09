@@ -220,6 +220,10 @@ function Invoke-PairStage {
                 $stopped = $true
                 $failure = [PSCustomObject]@{ Status = 'PENDING'; Message = "$Title stopped by user." }
             }
+            elseif ($env:SEG_TEST_FAIL_AFTER_STAGE -eq $Title) {
+                # Test hook for the rollback checks (item 28): fails the stage after it was applied on the node.
+                throw "SEG_TEST_FAIL_AFTER_STAGE: the stage '$Title' is made to fail on $($node.Name) after it was applied."
+            }
         }
         catch {
             $description = Get-ErrorDescription -ErrorRecord $_
@@ -489,6 +493,63 @@ function Get-SegBackhaulState {
     return (ConvertFrom-CheckOutput -Text $remote.Output).Values
 }
 
+function Invoke-PairRollback {
+    # Item 28: a stage failed after the first change of the run. Both nodes are restored to the snapshot taken
+    # before the run (apply-seg.sh restore): the previous working configuration comes back, fail-closed is not
+    # weakened, a node that had no sing-box keeps it stopped. The results of the nodes get the outcome.
+    Write-Log -Level 'WARN' -Message 'A stage failed after the first change: restoring both nodes to the state before this run.'
+
+    foreach ($node in $Nodes) {
+        $restored = $false
+        $problem = ''
+
+        try {
+            $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh restore $($node.Role) $backhaulInterface" -AllowFailure
+
+            if ($result.Code -eq 0 -and $result.Output -match 'APPLY_SEG_OK stage=restore') {
+                $restored = $true
+            }
+            else {
+                $problem = "apply-seg.sh restore failed (exit code $($result.Code))"
+            }
+        }
+        catch {
+            $problem = Get-ErrorDescription -ErrorRecord $_
+        }
+
+        foreach ($entry in @($Results | Where-Object { $_.Name -eq $node.Name })) {
+            if ($restored) {
+                Write-Log -Level 'OK' -Message "$($node.Name): restored to the state before this run."
+
+                if ($entry.Status -eq 'SKIPPED') {
+                    $entry.Status = 'ROLLED_BACK'
+                    $entry.Message = "$($entry.Message) The node was restored to the state before this run."
+                }
+                else {
+                    $entry.Message = "$($entry.Message) The node was restored to the state before this run."
+                }
+            }
+            else {
+                Write-Log -Level 'ERROR' -Message "$($node.Name): the rollback failed: $problem. The snapshot stays in /root/.seg-snapshot on the node; the node needs manual attention."
+                $entry.Status = 'ERROR'
+                $entry.Message = "$($entry.Message) ROLLBACK FAILED ($problem): the node needs manual attention, the snapshot stays in /root/.seg-snapshot."
+            }
+        }
+    }
+}
+
+function Invoke-SnapshotDrop {
+    # Best effort: the snapshot holds secrets and is not needed any more.
+    foreach ($node in $Nodes) {
+        try {
+            Invoke-Remote -IP $node.IP -Command '/root/apply-seg.sh snapshot-drop' -AllowFailure -Quiet | Out-Null
+        }
+        catch {
+            Write-Log -Level 'WARN' -Message "$($node.Name): the snapshot could not be removed: $(Get-ErrorDescription -ErrorRecord $_)"
+        }
+    }
+}
+
 function Get-ReportValue {
     param(
         [Parameter(Mandatory = $true)]
@@ -715,6 +776,37 @@ try {
         }
 
         # ----------------------------------------------------
+        # Snapshot (item 28): the configuration of both nodes before the first change of this run
+        # ----------------------------------------------------
+
+        $SnapshotTaken = $false
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'snapshot' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($applyCopy)
+                Invoke-Remote -IP $node.IP -Command 'install -d -o root -g root -m 700 /root/.seg-sync' -Quiet | Out-Null
+
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh snapshot $($node.Role) $backhaulInterface"
+
+                if ($result.Output -notmatch 'APPLY_SEG_OK stage=snapshot') {
+                    throw "apply-seg.sh did not report APPLY_SEG_OK for the snapshot on $($node.Name)"
+                }
+
+                return $true
+            }
+
+            if ($proceed) {
+                $SnapshotTaken = $true
+            }
+            else {
+                # Nothing was changed yet; remove what has been taken on the other node.
+                Invoke-SnapshotDrop
+            }
+        }
+
+        # ----------------------------------------------------
         # Step 7 (item 27): fail-closed on the gateway (apply-seg.sh failclosed)
         # ----------------------------------------------------
 
@@ -859,14 +951,26 @@ try {
         }
 
         # ----------------------------------------------------
+        # Rollback (item 28): a stage after the snapshot failed
+        # ----------------------------------------------------
+
+        if (-not $proceed -and $SnapshotTaken) {
+            Invoke-PairRollback
+        }
+
+        # ----------------------------------------------------
         # Step 17 (item 27): the final check of the pair (the same read-only check as -Check)
         # ----------------------------------------------------
 
         if ($proceed) {
             Write-Log -Level 'START' -Message 'Stage: final check'
+            $finalOk = $false
 
             try {
-                foreach ($finalResult in @(Invoke-SegCheckReport)) {
+                $finalResults = @(Invoke-SegCheckReport)
+                $finalOk = (@($finalResults | Where-Object { $_.Status -ne 'OK' }).Count -eq 0)
+
+                foreach ($finalResult in $finalResults) {
                     if ($finalResult.Status -eq 'OK') {
                         Add-NodeResult -Node $finalResult.Node -Status 'OK' -Message 'Configured; the final check passed.'
                     }
@@ -882,6 +986,15 @@ try {
                 foreach ($node in $Nodes) {
                     Add-NodeResult -Node $node -Status 'ERROR' -Message "The final check could not be completed: $description"
                 }
+            }
+
+            if ($finalOk) {
+                Invoke-SnapshotDrop
+            }
+            else {
+                # The configuration was applied but the pair is not healthy (the cause may be outside the
+                # configuration, for example a service on the Internet): it is not rolled back automatically.
+                Write-Log -Level 'WARN' -Message 'The snapshot of the state before this run stays in /root/.seg-snapshot on the nodes (restore: /root/apply-seg.sh restore <role> <interface>). It is replaced by the next run.'
             }
         }
     }

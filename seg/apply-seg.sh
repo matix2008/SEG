@@ -44,7 +44,7 @@ log START "Script started."
 
 [[ "${EUID}" -eq 0 ]] || die "apply-seg.sh must be run as root"
 
-USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 backhaul <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 egress <BACKHAUL_INTERFACE> <VPS1_BACKHAUL_IP> <VPS2_BACKHAUL_IP> | $0 singbox <VLESS_PORT> <REALITY_SERVER_NAME>"
+USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 backhaul <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 egress <BACKHAUL_INTERFACE> <VPS1_BACKHAUL_IP> <VPS2_BACKHAUL_IP> | $0 singbox <VLESS_PORT> <REALITY_SERVER_NAME> | $0 snapshot|restore <seg-gateway|seg-exit> <BACKHAUL_INTERFACE> | $0 snapshot-drop"
 
 [[ $# -ge 1 ]] || die "$USAGE"
 
@@ -759,6 +759,287 @@ stage_singbox()
     log OK "sing-box installed and verified."
 }
 
+# ------------------------------------------------------------
+# Snapshot and restore of the whole node configuration (roadmap, item 28)
+# ------------------------------------------------------------
+# The snapshot is taken before the first change of a run and restored when a later stage fails: the node returns
+# to the working state it had before the run. Fail-closed is never weakened: when the node had none before, the
+# new fail-closed stays. A node that had no sing-box before is left with sing-box stopped and disabled.
+# The snapshot holds secrets (backhaul keys, REALITY key): root only, removed after a successful restore or run.
+
+SNAP_DIR="/root/.seg-snapshot"
+
+snapshot_files()
+{
+    # snapshot_files <role> <interface>
+    if [[ "$1" == "seg-gateway" ]]; then
+        printf '%s\n' \
+            /etc/seg/seg-failclosed.nft \
+            /etc/systemd/system/seg-failclosed.service \
+            "/etc/amnezia/amneziawg/${2}.conf" \
+            /etc/sing-box/config.json \
+            /etc/systemd/system/sing-box.service \
+            /etc/sysctl.d/90-seg-rp-filter.conf
+    else
+        printf '%s\n' \
+            /etc/seg/seg-exit.nft \
+            /etc/systemd/system/seg-exit-fw.service \
+            /etc/systemd/system/seg-exit-keepalive.service \
+            /etc/unbound/unbound.conf.d/seg.conf \
+            "/etc/amnezia/amneziawg/${2}.conf"
+    fi
+}
+
+snapshot_units()
+{
+    if [[ "$1" == "seg-gateway" ]]; then
+        printf '%s\n' seg-failclosed.service "awg-quick@${2}.service" sing-box.service
+    else
+        printf '%s\n' seg-exit-fw.service "awg-quick@${2}.service" seg-exit-keepalive.service unbound.service
+    fi
+}
+
+check_role_and_interface()
+{
+    [[ "$1" == "seg-gateway" || "$1" == "seg-exit" ]] || die "Invalid role: $1"
+    [[ "$2" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || die "Invalid backhaul interface: $2"
+}
+
+stage_snapshot()
+{
+    local role="$1" interface="$2" file unit
+
+    check_role_and_interface "$role" "$interface"
+
+    # Only the latest snapshot is kept: an earlier one belongs to an aborted run.
+    rm -rf "$SNAP_DIR"
+    install -d -o root -g root -m 700 "$SNAP_DIR" "$SNAP_DIR/files"
+
+    {
+        echo "role ${role}"
+        echo "interface ${interface}"
+        echo "taken $(date '+%Y-%m-%d %H:%M:%S')"
+    } >"$SNAP_DIR/manifest"
+
+    while IFS= read -r file; do
+        if [[ -f "$file" ]]; then
+            mkdir -p "$SNAP_DIR/files$(dirname "$file")"
+            cp -a "$file" "$SNAP_DIR/files$file"
+            echo "present ${file}" >>"$SNAP_DIR/manifest"
+            echo "meta ${file} $(stat -c '%a %U:%G' "$file")" >>"$SNAP_DIR/manifest"
+        else
+            echo "absent ${file}" >>"$SNAP_DIR/manifest"
+        fi
+    done < <(snapshot_files "$role" "$interface")
+
+    while IFS= read -r unit; do
+        local active=0 enabled=0
+
+        systemctl is-active --quiet "$unit" 2>/dev/null && active=1 || true
+        systemctl is-enabled --quiet "$unit" 2>/dev/null && enabled=1 || true
+        echo "unit ${unit} active=${active} enabled=${enabled}" >>"$SNAP_DIR/manifest"
+    done < <(snapshot_units "$role" "$interface")
+
+    # The directory is 700 root: the copies keep the mode and the owner of the originals (cp -a), which the
+    # restore needs (for example the sing-box user reads its configuration through the group).
+    log OK "Snapshot of $(grep -c '^present ' "$SNAP_DIR/manifest") file(s) and $(grep -c '^unit ' "$SNAP_DIR/manifest") unit state(s) taken."
+}
+
+snap_present()
+{
+    grep -Fxq "present $1" "$SNAP_DIR/manifest"
+}
+
+snap_meta()
+{
+    # snap_meta <file>: the recorded "<mode> <owner>:<group>"
+    local line
+    line="$(grep -F "meta $1 " "$SNAP_DIR/manifest" | head -n1 || true)"
+    printf '%s\n' "${line#meta $1 }"
+}
+
+snap_unit_flag()
+{
+    # snap_unit_flag <unit> <active|enabled>: prints 1 or 0 (nothing when the unit is not in the snapshot)
+    local line
+    line="$(grep -F "unit $1 " "$SNAP_DIR/manifest" | head -n1 || true)"
+
+    if [[ "$2" == "active" ]]; then
+        sed -nE 's/.* active=([01]) .*/\1/p' <<<"$line"
+    else
+        sed -nE 's/.* enabled=([01])$/\1/p' <<<"$line"
+    fi
+}
+
+stage_restore()
+{
+    local role="$1" interface="$2" file unit
+
+    check_role_and_interface "$role" "$interface"
+
+    [[ -f "$SNAP_DIR/manifest" ]] || die "There is no snapshot to restore ($SNAP_DIR)"
+    grep -Fxq "role ${role}" "$SNAP_DIR/manifest" || die "The snapshot belongs to another role"
+    grep -Fxq "interface ${interface}" "$SNAP_DIR/manifest" || die "The snapshot belongs to another interface"
+
+    log INFO "Restoring the node to the snapshot: $(grep '^taken ' "$SNAP_DIR/manifest")"
+
+    local backhaul_conf="/etc/amnezia/amneziawg/${interface}.conf"
+    local backhaul_unit="awg-quick@${interface}.service"
+    local backhaul_changed=0 singbox_changed=0 unbound_changed=0
+
+    # What differs from the snapshot decides which services need a restart.
+    if snap_present "$backhaul_conf"; then
+        cmp -s "$SNAP_DIR/files$backhaul_conf" "$backhaul_conf" || backhaul_changed=1
+    else
+        backhaul_changed=1
+    fi
+
+    if [[ "$role" == "seg-gateway" ]]; then
+        snap_present /etc/sing-box/config.json && cmp -s "$SNAP_DIR/files/etc/sing-box/config.json" /etc/sing-box/config.json &&
+            snap_present /etc/systemd/system/sing-box.service && cmp -s "$SNAP_DIR/files/etc/systemd/system/sing-box.service" /etc/systemd/system/sing-box.service || singbox_changed=1
+
+        # A node that had no sing-box: stopped and disabled before its files are removed.
+        if ! snap_present /etc/sing-box/config.json || ! snap_present /etc/systemd/system/sing-box.service; then
+            systemctl disable --now sing-box.service >/dev/null 2>&1 || true
+        fi
+    else
+        snap_present /etc/unbound/unbound.conf.d/seg.conf && cmp -s "$SNAP_DIR/files/etc/unbound/unbound.conf.d/seg.conf" /etc/unbound/unbound.conf.d/seg.conf || unbound_changed=1
+
+        if ! snap_present /etc/systemd/system/seg-exit-keepalive.service; then
+            systemctl disable --now seg-exit-keepalive.service >/dev/null 2>&1 || true
+        fi
+
+        if ! snap_present /etc/systemd/system/seg-exit-fw.service; then
+            systemctl disable --now seg-exit-fw.service >/dev/null 2>&1 || true
+            nft delete table inet seg_exit >/dev/null 2>&1 || true
+            nft delete table ip seg_exit_nat >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if ! snap_present "$backhaul_conf"; then
+        systemctl disable --now "$backhaul_unit" >/dev/null 2>&1 || true
+    fi
+
+    # Files: the previous content comes back, a file that did not exist is removed. Fail-closed is the exception:
+    # a node that had none keeps the new one (the restore never weakens it).
+    while IFS= read -r file; do
+        if snap_present "$file"; then
+            mkdir -p "$(dirname "$file")"
+            cp -a "$SNAP_DIR/files$file" "$file"
+
+            # The recorded mode and owner are applied explicitly as well.
+            read -r meta_mode meta_owner <<<"$(snap_meta "$file")"
+            [[ -z "${meta_mode:-}" ]] || chmod "$meta_mode" "$file"
+            [[ -z "${meta_owner:-}" ]] || chown "$meta_owner" "$file"
+        elif [[ "$file" != /etc/seg/seg-failclosed.nft && "$file" != /etc/systemd/system/seg-failclosed.service ]]; then
+            rm -f "$file"
+        fi
+    done < <(snapshot_files "$role" "$interface")
+
+    systemctl daemon-reload
+
+    # Enabled flags of the units that existed
+    while IFS= read -r unit; do
+        if [[ "$(snap_unit_flag "$unit" enabled)" == "1" ]]; then
+            systemctl enable "$unit" >/dev/null 2>&1 || true
+        elif [[ -f "/etc/systemd/system/${unit}" ]] && snap_present "/etc/systemd/system/${unit}"; then
+            systemctl disable "$unit" >/dev/null 2>&1 || true
+        fi
+    done < <(snapshot_units "$role" "$interface")
+
+    if [[ "$role" == "seg-gateway" ]]; then
+        # Fail-closed: the previous table is loaded again in one transaction; a node that had none keeps the new one.
+        if snap_present /etc/seg/seg-failclosed.nft && snap_present /etc/systemd/system/seg-failclosed.service; then
+            if systemctl is-active --quiet seg-failclosed.service; then
+                systemctl reload seg-failclosed.service
+            else
+                systemctl start seg-failclosed.service
+            fi
+        fi
+    fi
+
+    if snap_present "$backhaul_conf"; then
+        if [[ "$(snap_unit_flag "$backhaul_unit" active)" == "1" ]]; then
+            if [[ "$backhaul_changed" == "1" ]] || ! systemctl is-active --quiet "$backhaul_unit"; then
+                systemctl restart "$backhaul_unit"
+            fi
+        fi
+    fi
+
+    if [[ "$role" == "seg-gateway" ]]; then
+        if snap_present /etc/sing-box/config.json && snap_present /etc/systemd/system/sing-box.service; then
+            if [[ "$(snap_unit_flag sing-box.service active)" == "1" ]]; then
+                if [[ "$singbox_changed" == "1" ]] || ! systemctl is-active --quiet sing-box.service; then
+                    systemctl restart sing-box.service
+                fi
+            else
+                systemctl stop sing-box.service >/dev/null 2>&1 || true
+            fi
+        fi
+    else
+        if snap_present /etc/systemd/system/seg-exit-fw.service; then
+            if [[ "$(snap_unit_flag seg-exit-fw.service active)" == "1" ]]; then
+                if systemctl is-active --quiet seg-exit-fw.service; then
+                    systemctl reload seg-exit-fw.service
+                else
+                    systemctl start seg-exit-fw.service
+                fi
+            fi
+        fi
+
+        if [[ "$unbound_changed" == "1" ]]; then
+            systemctl restart unbound.service || true
+        fi
+
+        if snap_present /etc/systemd/system/seg-exit-keepalive.service && [[ "$(snap_unit_flag seg-exit-keepalive.service active)" == "1" ]]; then
+            systemctl enable --now seg-exit-keepalive.service >/dev/null
+        fi
+    fi
+
+    # Verification: the files and the services are as they were.
+    local problems=()
+
+    while IFS= read -r file; do
+        if snap_present "$file"; then
+            cmp -s "$SNAP_DIR/files$file" "$file" || problems+=("${file}:differs")
+            [[ "$(stat -c '%a %U:%G' "$file" 2>/dev/null)" == "$(snap_meta "$file")" ]] || problems+=("${file}:mode-or-owner-differs")
+        elif [[ "$file" != /etc/seg/seg-failclosed.nft && "$file" != /etc/systemd/system/seg-failclosed.service && -e "$file" ]]; then
+            problems+=("${file}:should-not-exist")
+        fi
+    done < <(snapshot_files "$role" "$interface")
+
+    while IFS= read -r unit; do
+        local was_active
+        was_active="$(snap_unit_flag "$unit" active)"
+
+        [[ -n "$was_active" ]] || continue
+
+        if [[ "$was_active" == "1" ]]; then
+            systemctl is-active --quiet "$unit" || problems+=("${unit}:not-active")
+        elif [[ "$unit" == "sing-box.service" || "$unit" == "seg-exit-keepalive.service" ]]; then
+            ! systemctl is-active --quiet "$unit" || problems+=("${unit}:should-be-stopped")
+        fi
+    done < <(snapshot_units "$role" "$interface")
+
+    if [[ "$role" == "seg-gateway" ]]; then
+        nft list table inet seg_failclosed >/dev/null 2>&1 || problems+=("fail-closed-table-missing")
+    fi
+
+    if [[ "${#problems[@]}" -gt 0 ]]; then
+        log ERROR "The restore is not complete: ${problems[*]}. The snapshot is kept in $SNAP_DIR." >&2
+        exit 1
+    fi
+
+    rm -rf "$SNAP_DIR"
+    log OK "The node is restored to the state before the run."
+}
+
+stage_snapshot_drop()
+{
+    rm -rf "$SNAP_DIR"
+    log OK "The snapshot is removed."
+}
+
 case "$STAGE" in
     failclosed)
         [[ $# -eq 1 ]] || die "$USAGE"
@@ -775,6 +1056,18 @@ case "$STAGE" in
     egress)
         [[ $# -eq 4 ]] || die "$USAGE"
         stage_egress "$2" "$3" "$4"
+        ;;
+    snapshot)
+        [[ $# -eq 3 ]] || die "$USAGE"
+        stage_snapshot "$2" "$3"
+        ;;
+    restore)
+        [[ $# -eq 3 ]] || die "$USAGE"
+        stage_restore "$2" "$3"
+        ;;
+    snapshot-drop)
+        [[ $# -eq 1 ]] || die "$USAGE"
+        stage_snapshot_drop
         ;;
     singbox)
         [[ $# -eq 3 ]] || die "$USAGE"

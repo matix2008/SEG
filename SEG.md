@@ -897,21 +897,22 @@ SECURITY
 1. Upgrade.
 2. Установка пакетов и подготовка роли (`bootstrap-seg.sh`).
 3. Hardening (`secure-seg.sh`).
-4. Fail-closed VPS2.
-5. Маршрутизация selected-трафика VPS2 (`bind_interface`, `rp_filter`, MTU).
-6. awg-backhaul VPS2.
-7. awg-backhaul VPS1.
-8. NAT/firewall/DNS VPS1.
-9. Проверка handshake.
-10. Проверка DNS через VPS1.
-11. Проверка external IP = VPS1.
-12. sing-box VPS2.
-13. VLESS/REALITY.
-14. server-side seg-list.
-15. итоговый -Check.
+4. Снимок состояния узлов для отката (`apply-seg.sh snapshot`).
+5. Fail-closed VPS2.
+6. Маршрутизация selected-трафика VPS2 (`bind_interface`, `rp_filter`, MTU).
+7. awg-backhaul VPS2.
+8. awg-backhaul VPS1.
+9. NAT/firewall/DNS VPS1.
+10. Проверка handshake.
+11. Проверка DNS через VPS1.
+12. Проверка external IP = VPS1.
+13. sing-box VPS2.
+14. VLESS/REALITY.
+15. server-side seg-list.
+16. итоговый -Check.
 ```
 
-При ошибке выполняется rollback предыдущей рабочей конфигурации.
+При ошибке выполняется rollback: до первого изменения на каждом узле сохраняется снимок управляемых файлов (с правами и владельцем) и состояния служб, а при ошибке любого последующего этапа оба узла возвращаются к снимку (README, раздел 6, «Откат при ошибке»). Fail-closed при откате не ослабляется, политика `SEG_UNMATCHED_POLICY` не переключается, selected-трафик не направляется через публичный интерфейс VPS2.
 
 При первой неуспешной установке sing-box остаётся выключенным, fail-closed сохраняется.
 
