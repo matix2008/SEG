@@ -43,7 +43,7 @@
 | 3 Выбор серверов | выполнен | `Select-ServersForMode` и `Assert-SegTopology` в загрузчике; режим VPN в `sync-servers.ps1`, `add-client.ps1`, `make-client-config.ps1` обрабатывает только `vpn-server`, проверено в песочнице (`-Mode VPN all` берёт только `vpn-server`, `seg-*` не выбираются). Применение в SEG-скриптах — пункт 12 |
 | 4 Миграция `servers.txt` | выполнен | `Convert-ServersFileToCurrent`; `sync-servers.ps1` мигрирует только в обычном запуске; проверено в песочнице: резервная копия идентична исходнику, повторный запуск без изменений, три копии хранятся, при ошибке проверки исходный файл не меняется, `-Check` ничего не пишет, `add-client` и `make-client-config` просят сначала мигрировать. Проверка на реальном VPN-сервере — пункты 29 и 30 |
 | 5 `config/seg.env` | выполнен | `config/seg.env.example`, `.gitignore`, `scripts\lib\segenv.ps1` (загрузчик и валидатор, 54 теста, включая проверку значений прототипа, образца, MTU без фрагментации, меток, пересечения сетей и отсутствия секретов в сообщениях), `README.md` (раздел 3), `SEG.md` (раздел 6); серверный шаблон `sing-box` использует `SEG_REALITY_DEST`. Генерация файла — пункт 6, проверка метки при генерации — там же |
-| 6 Генерация и backup по режимам | не начат | — |
+| 6 Генерация и backup по режимам | выполнен | `scripts\seg\generate-server-env.ps1` и `scripts\lib\common.ps1`; 29 проверок в песочнице (первая генерация, повторная с сохранением настроек и ротацией секретов, расчёт MTU, `-NoBackup`, `-Restore`, повреждённый и невалидный существующий файл, отсутствие `sing-box`, отсутствие секретов в журнале, `server.env` не меняется, нет временных файлов); `README.md` (разделы 2 и 4), `SEG.md` (раздел 6). Шаги ротации SEG с `sync` и перевыпуском UUID описываются в README вместе с пп. 12, 23, 24, потому что зависят от их реализации |
 | 7 `config/seg-list.json` | не начат | — |
 | 8 Версии | не начат | — |
 | 9 Хранение SEG-клиентов | не начат | — |
@@ -676,7 +676,7 @@ VPS1 = Role seg-exit
 
 Для режима SEG `-Check` и общая логика описаны в пунктах 26–28.
 
-Обновить README: описание `sync-servers.ps1 -Mode`, поведение `all`, разделы 5–6.
+Обновить README: описание `sync-servers.ps1 -Mode`, поведение `all`, разделы 5–6; шаги ротации ключей SEG (REALITY, backhaul) после `generate-server-env.ps1 -Mode SEG` и действия при компрометации VPS1 и VPS2.
 
 ### Пункт 13. Реализовать `bootstrap-seg.sh` и `secure-seg.sh`
 
@@ -1058,7 +1058,7 @@ segListSha256
 
 Реализация: `scripts\seg\remove-client.ps1`.
 
-Обновить README: описание `remove-client.ps1 -Mode` и порядок отзыва.
+Обновить README: описание `remove-client.ps1 -Mode` и порядок отзыва; ротация UUID клиента (`remove-client.ps1 -Mode SEG`, `add-client.ps1 -Mode SEG`, `sync`).
 
 ### Пункт 25. Доработать `make-client-config.ps1`
 

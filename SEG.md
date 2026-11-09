@@ -258,6 +258,16 @@ Backup/restore выполняется отдельно для параметро
 
 Параметры хранятся по ролям пары: `*_VPS1` — `seg-exit`, `*_VPS2` — `seg-gateway`. Порт VLESS в `seg.env` не хранится (это `Port` у `seg-gateway` в `servers.txt`), UUID клиентов — в `clients/seg/`.
 
+Генерация (`generate-server-env.ps1 -Mode SEG`, реализация — `scripts\seg\generate-server-env.ps1`):
+
+- секреты создаются заново при каждой генерации: пара REALITY (локальный `sing-box 1.14.4`, `tools\sing-box.exe`) и `short_id` (8 случайных байт), две пары ключей и PSK backhaul (`awg`);
+- параметры AmneziaWG: `Jc` 4–12, `Jmin` 20–60, `Jmax` от `Jmin + 20` до 120, `S1 = S2 = S3 = S4` в диапазоне 15–150, `H1–H4` уникальные значения от 5;
+- `SEG_BACKHAUL_MTU` не задаётся вручную: он равен пределу без фрагментации (формула выше) минус 16 байт запаса, в пределах 576–1420 (при `S4 = 144`, `RandomTrailers = on` — 800);
+- нечувствительные настройки существующего файла (имя и dest REALITY, flow, fingerprint, сеть, адреса, порт и интерфейс backhaul, `RandomTrailers`, метки, политика) сохраняются; если файл нечитаем, берутся значения по умолчанию (`www.microsoft.com`, `10.77.0.0/30`, порт 42100, `awg-backhaul`, `RandomTrailers = on`, метки `0x5e90` и `0x5e91`, политика `direct`);
+- результат проверяется валидатором до замены файла; при ошибке `seg.env` не меняется, резервная копия создаётся только после успешной проверки;
+- проверка наличия `sing-box` нужной версии и `awg.exe` выполняется до подтверждения и до любых изменений;
+- сеть клиентов VPN из `config/server.env` (если файл есть) добавляется в зарезервированные сети для проверки пересечения.
+
 ## 7. `seg-list.json`
 
 Файл:
@@ -891,7 +901,7 @@ SECURITY
 
 ```text
 scripts\seg\*.ps1       SEG-логика (sync, клиенты, профили)
-scripts\lib\common.ps1  общие функции (SSH, лог, upgrade-этап)
+scripts\lib\common.ps1  общие функции SEG-скриптов: журнал, подтверждения, awg, случайные значения, backup файлов env (SSH и upgrade-этап добавляются с sync-seg.ps1)
 scripts\lib\servers.ps1 загрузчик servers.txt (разбор, валидация, выбор по режиму, миграция); используется и VPN-, и SEG-скриптами
 scripts\lib\segenv.ps1  загрузчик и валидатор config/seg.env (SEG-скрипты)
 seg\*.sh                bootstrap-seg.sh, secure-seg.sh
