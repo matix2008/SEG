@@ -23,7 +23,6 @@ $Root       = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $EnvFile    = Join-Path $Root 'config\seg.env'
 $VpnEnvFile = Join-Path $Root 'config\server.env'
 
-$RequiredSingBoxVersion = '1.14.4'
 $BackupKeepCount        = 3
 
 # Margin below the computed no-fragmentation MTU limit (SEG.md, section 13).
@@ -31,6 +30,8 @@ $MtuMargin = 16
 
 . (Join-Path $PSScriptRoot '..\lib\common.ps1')
 . (Join-Path $PSScriptRoot '..\lib\segenv.ps1')
+
+$RequiredSingBoxVersion = $script:SegSingBoxVersion
 
 Initialize-Logging -Root $Root -ScriptName (Split-Path -Leaf $PSCommandPath)
 

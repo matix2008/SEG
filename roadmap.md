@@ -50,7 +50,7 @@
 | 10 DNS-модель | выполнен | `SEG.md` (раздел 10) и `README.md` (раздел 10); подтверждено прототипом: FakeIP только для `seg-list`, selected DNS через VPS2, backhaul и резолвер VPS1 без запасного варианта (при остановленном DNS VPS1 selected-домены не открываются), прямой DNS клиента по DoH, `ipv4_only`, служебный путь к DNS VPS1 открыт, остальная сеть backhaul закрыта. Проверки пп. 35, 36, 39 повторяют это в этапе 3 |
 | 11 Доменная модель VLESS | выполнен | `SEG.md` (раздел 9) и `README.md` (раздел 10); подтверждено прототипом: на VPS2 приходит домен (`inbound connection to <домен>:443`), IP с SNI из списка определяется sniffing и уходит через VPS1, IP из CIDR идёт через `seg-out`; поведение при ECH проверяется в п. 36 |
 | 12 `sync-servers.ps1` | выполнен | `scripts\seg\sync-seg.ps1` (каркас: проверка локальной конфигурации, SSH с `StrictHostKeyChecking=yes`, upgrade, журнал, подтверждения, сводка, коды выхода, пара обрабатывается целиком) и SSH-блок в `scripts\lib\common.ps1` (`Test-Ssh`, `Invoke-Remote`, `Copy-ToServer`, `Wait-SshAfterReboot`, `Invoke-UpgradeStage`, `New-LinuxCopy`, `Write-LogOutput`); `Get-SegReservedNetworks` вынесена в `segenv.ps1` (генератор использует её же, 30 проверок генератора проходят). Проверено на прототипной паре VPS1/VPS2: `-Check` (локальная конфигурация, SSH, ОС, ядро, признак перезагрузки; код 2, статус `INCOMPLETE`), цель не `all` и пустой ввод дают ошибку и код 1, недоступный узел (`192.0.2.1`) даёт `UNREACHABLE`, второй узел `SKIPPED`, код 1; применение с отказом от перезагрузки — `PENDING` и `SKIPPED`; применение с перезагрузкой обоих узлов — upgrade завершён, ядро 6.8.0-149, службы прототипа поднялись сами (backhaul, DNS VPS1 через backhaul отвечает). В пункт не входят и закрываются по своим номерам: security (13), rollback (28), расширенный `-Check` (26), состояние узлов после upgrade сейчас `PENDING` с пояснением. `README.md` (разделы 2–4, 6, 8: порядок, ротация и компрометация SEG). Побочный результат: создан рабочий `config/seg.env` для пункта 31 |
-| 13 `bootstrap-seg.sh`, `secure-seg.sh` | не начат | — |
+| 13 `bootstrap-seg.sh`, `secure-seg.sh` | выполнен | `seg\bootstrap-seg.sh`, `seg\secure-seg.sh`; этапы `bootstrap` и `hardening` в `scripts\seg\sync-seg.ps1` (попарное выполнение, `Invoke-PairStage`); `$script:SegSingBoxVersion` в `segenv.ps1`. Проверено на прототипной паре VPS1/VPS2: полный прогон `sync-servers.ps1 -Mode SEG all` (upgrade, bootstrap, hardening) без вопросов и ошибок; UFW на VPS2 включён (22/tcp, 443/tcp, 42100/udp только от IP VPS1), на VPS1 правила DNS и `ufw route` помечены `seg:` и заменили прежние; SSH без пароля; прототип после hardening работает (`sing-box` слушает 443, DNS VPS1 через backhaul отвечает). Повторный запуск идемпотентен; смена порта VLESS и порта backhaul удаляет устаревшие помеченные правила и оставляет прочие. Установка `sing-box`: неверный хэш отвергается до распаковки (пакет удаляется), верный пакет ставится атомарной заменой, бинарник идентичен прежнему. Неверные параметры (порт 99999, VLESS 22, нехватка аргументов, не-hex хэш) отвергаются; ошибка hardening на gateway даёт `ERROR`, а на exit `SKIPPED` и код 1. `README.md` (разделы 4–6), `SEG.md` (раздел 24), `roadmap.md` (порядок в пункте 27). Конфигурации и службы ролей — пункты 14–17, 19–20 |
 | 14 Fail-closed VPS2 | не начат | — |
 | 15 Маршрутизация selected-трафика VPS2 | не начат | — |
 | 16 Backhaul VPS2 | не начат | — |
@@ -717,6 +717,8 @@ seg-exit
     awg-backhaul.
 ```
 
+`bootstrap-seg.sh` устанавливает ПО и готовит узел (бинарник и пользователь `sing-box`, `unbound` с `root.key`, forwarding на `seg-exit`, `nftables`, AmneziaWG); сами конфигурации, юниты и службы (fail-closed, backhaul, таблицы `seg_exit`, `seg-exit-keepalive`, юнит и конфиг `sing-box`) устанавливают пункты 14–17 и 19–20, чтобы каждый пункт проверялся отдельно. Порядок в `sync-seg.ps1`: upgrade, `bootstrap-seg.sh`, `secure-seg.sh` (порты открываются по роли заранее, поэтому подтверждение перед hardening не нужно).
+
 `secure-seg.sh` различает роли:
 
 ```text
@@ -1146,19 +1148,20 @@ SECURITY=OK
 1. Проверить локальную конфигурацию.
 2. Проверить SSH VPS1/VPS2.
 3. Выполнить upgrade.
-4. Выполнить hardening.
-5. Подготовить candidate-конфигурации.
-6. Установить fail-closed на VPS2.
-7. Настроить маршрутизацию selected-трафика VPS2.
-8. Настроить awg-backhaul VPS2.
-9. Настроить awg-backhaul/NAT/firewall/DNS VPS1.
-10. Проверить handshake.
-11. Проверить DNS через backhaul.
-12. Проверить egress IP через VPS1.
-13. Установить/configure sing-box VPS2.
-14. Проверить VLESS/REALITY.
-15. Проверить server-side routing (selected → VPS1, прочее по SEG_UNMATCHED_POLICY).
-16. Выполнить итоговый -Check.
+4. Установить пакеты и подготовить роль (bootstrap-seg.sh).
+5. Выполнить hardening (secure-seg.sh).
+6. Подготовить candidate-конфигурации.
+7. Установить fail-closed на VPS2.
+8. Настроить маршрутизацию selected-трафика VPS2.
+9. Настроить awg-backhaul VPS2.
+10. Настроить awg-backhaul/NAT/firewall/DNS VPS1.
+11. Проверить handshake.
+12. Проверить DNS через backhaul.
+13. Проверить egress IP через VPS1.
+14. Установить/configure sing-box VPS2.
+15. Проверить VLESS/REALITY.
+16. Проверить server-side routing (selected → VPS1, прочее по SEG_UNMATCHED_POLICY).
+17. Выполнить итоговый -Check.
 ```
 
 ### Пункт 28. Реализовать rollback SEG

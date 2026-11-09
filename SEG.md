@@ -894,19 +894,21 @@ SECURITY
 ## 24. Порядок развёртывания
 
 ```text
-1. Upgrade/hardening.
-2. Fail-closed VPS2.
-3. Маршрутизация selected-трафика VPS2 (`bind_interface`, `rp_filter`, MTU).
-4. awg-backhaul VPS2.
-5. awg-backhaul VPS1.
-6. NAT/firewall/DNS VPS1.
-7. Проверка handshake.
-8. Проверка DNS через VPS1.
-9. Проверка external IP = VPS1.
-10. sing-box VPS2.
-11. VLESS/REALITY.
-12. server-side seg-list.
-13. итоговый -Check.
+1. Upgrade.
+2. Установка пакетов и подготовка роли (`bootstrap-seg.sh`).
+3. Hardening (`secure-seg.sh`).
+4. Fail-closed VPS2.
+5. Маршрутизация selected-трафика VPS2 (`bind_interface`, `rp_filter`, MTU).
+6. awg-backhaul VPS2.
+7. awg-backhaul VPS1.
+8. NAT/firewall/DNS VPS1.
+9. Проверка handshake.
+10. Проверка DNS через VPS1.
+11. Проверка external IP = VPS1.
+12. sing-box VPS2.
+13. VLESS/REALITY.
+14. server-side seg-list.
+15. итоговый -Check.
 ```
 
 При ошибке выполняется rollback предыдущей рабочей конфигурации.

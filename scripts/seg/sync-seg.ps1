@@ -49,6 +49,8 @@ $SegEnvFile   = Join-Path $Root 'config\seg.env'
 $VpnEnvFile   = Join-Path $Root 'config\server.env'
 $SegListFile  = Join-Path $Root 'config\seg-list.json'
 $UpgradeFile  = Join-Path $Root 'upgrade.sh'
+$BootstrapFile = Join-Path $Root 'seg\bootstrap-seg.sh'
+$SecureFile   = Join-Path $Root 'seg\secure-seg.sh'
 $TemplatesDir = Join-Path $Root 'seg\templates'
 
 $RequiredTemplates = @(
@@ -69,7 +71,7 @@ $RequiredTemplates = @(
 # Step 1 (item 27): local configuration
 # ============================================================
 
-$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, (Join-Path $Root 'seg\sing-box.sha256')) +
+$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, $BootstrapFile, $SecureFile, (Join-Path $Root 'seg\sing-box.sha256')) +
     @($RequiredTemplates | ForEach-Object { Join-Path $TemplatesDir $_ })
 
 foreach ($file in $requiredFiles) {
@@ -86,6 +88,11 @@ Write-Log -Level 'OK' -Message 'seg.env validated. Secret values are not logged.
 
 $SegList = Read-SegList -Path $SegListFile
 Write-Log -Level 'OK' -Message "seg-list.json validated: version $($SegList.Version), SHA-256 $($SegList.Sha256)."
+
+$SingBoxVersion = $script:SegSingBoxVersion
+$SingBoxPackage = Get-VerifiedSingBoxLinuxPackage -Root $Root -Version $SingBoxVersion
+$SingBoxPackageSha256 = (Read-HashFile -Path (Join-Path $Root 'seg\sing-box.sha256'))[(Split-Path -Leaf $SingBoxPackage)]
+Write-Log -Level 'OK' -Message "sing-box $SingBoxVersion Linux package verified: $(Split-Path -Leaf $SingBoxPackage)"
 
 $ServersLoaded = Read-ServersFile -Path $ServersFile
 
@@ -152,6 +159,52 @@ function Skip-RemainingNodes {
     foreach ($node in $Remaining) {
         Add-NodeResult -Node $node -Status 'SKIPPED' -Message $Reason
     }
+}
+
+function Invoke-PairStage {
+    # Runs one stage on both nodes (gateway first). Action receives the node and returns $false when the
+    # user declined to continue. The first failure or refusal stops the run: the nodes get results and
+    # the function returns $false.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Title,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    Write-Log -Level 'START' -Message "Stage: $Title"
+
+    foreach ($node in $Nodes) {
+        $failure = $null
+        $stopped = $false
+
+        try {
+            if (-not (& $Action $node)) {
+                $stopped = $true
+                $failure = [PSCustomObject]@{ Status = 'PENDING'; Message = "$Title stopped by user." }
+            }
+        }
+        catch {
+            $description = Get-ErrorDescription -ErrorRecord $_
+            Write-Log -Level 'ERROR' -Message "$($node.Name): $description"
+            $stopped = $true
+            $failure = [PSCustomObject]@{ Status = 'ERROR'; Message = $description }
+        }
+
+        if ($stopped) {
+            Add-NodeResult -Node $node -Status $failure.Status -Message $failure.Message
+
+            foreach ($other in @($Nodes | Where-Object { $_.Name -ne $node.Name })) {
+                Add-NodeResult -Node $other -Status 'SKIPPED' -Message "The run stopped at stage '$Title' ($($node.Name))."
+            }
+
+            return $false
+        }
+    }
+
+    Write-Log -Level 'OK' -Message "Stage completed on both nodes: $Title"
+    return $true
 }
 
 function Get-SegNodeBaseInfo {
@@ -240,28 +293,77 @@ try {
         New-Item -ItemType Directory -Path $temp | Out-Null
         Write-Log -Level 'INFO' -Message "Temporary directory created: $temp"
 
-        $upgradeCopy = New-LinuxCopy -Source $UpgradeFile -TempDirectory $temp
+        $upgradeCopy   = New-LinuxCopy -Source $UpgradeFile -TempDirectory $temp
+        $bootstrapCopy = New-LinuxCopy -Source $BootstrapFile -TempDirectory $temp
+        $secureCopy    = New-LinuxCopy -Source $SecureFile -TempDirectory $temp
 
-        for ($i = 0; $i -lt $Nodes.Count; $i++) {
-            $node = $Nodes[$i]
+        $proceed = Invoke-PairStage -Title 'upgrade' -Action {
+            param($node)
 
-            try {
-                Copy-ToServer -IP $node.IP -Files @($upgradeCopy)
+            Copy-ToServer -IP $node.IP -Files @($upgradeCopy)
+            return (Invoke-UpgradeStage -IP $node.IP)
+        }
 
-                if (-not (Invoke-UpgradeStage -IP $node.IP)) {
-                    Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade stopped by user (reboot declined).'
-                    Skip-RemainingNodes -Remaining @($Nodes | Select-Object -Skip ($i + 1)) -Reason 'Not processed: the upgrade of the previous node was not completed.'
-                    break
+        # ----------------------------------------------------
+        # Packages and role preparation (bootstrap-seg.sh)
+        # ----------------------------------------------------
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'bootstrap' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($bootstrapCopy)
+                Invoke-Remote -IP $node.IP -Command 'install -d -o root -g root -m 700 /root/.seg-sync' -Quiet | Out-Null
+
+                if ($node.Role -eq 'seg-gateway') {
+                    Copy-ToServer -IP $node.IP -Files @($SingBoxPackage) -Destination '/root/.seg-sync/'
+
+                    $arguments = "seg-gateway $SingBoxVersion $SingBoxPackageSha256"
+                }
+                else {
+                    $arguments = 'seg-exit'
                 }
 
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade completed; the SEG configuration stages are not implemented yet (roadmap items 13-20).'
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/bootstrap-seg.sh`n/root/bootstrap-seg.sh $arguments"
+
+                if ($result.Output -notmatch "BOOTSTRAP_SEG_OK role=$($node.Role)") {
+                    throw "bootstrap-seg.sh did not report BOOTSTRAP_SEG_OK on $($node.Name)"
+                }
+
+                return $true
             }
-            catch {
-                $description = Get-ErrorDescription -ErrorRecord $_
-                Write-Log -Level 'ERROR' -Message "$($node.Name): $description"
-                Add-NodeResult -Node $node -Status 'ERROR' -Message $description
-                Skip-RemainingNodes -Remaining @($Nodes | Select-Object -Skip ($i + 1)) -Reason 'Not processed: the previous node failed.'
-                break
+        }
+
+        # ----------------------------------------------------
+        # Step 4 (item 27): hardening (secure-seg.sh)
+        # ----------------------------------------------------
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'hardening' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($secureCopy)
+
+                if ($node.Role -eq 'seg-gateway') {
+                    $arguments = "seg-gateway $($Gateway.Port) $($SegEnv['SEG_BACKHAUL_PORT']) $($Exit.IP) $($SegEnv['SEG_BACKHAUL_INTERFACE'])"
+                }
+                else {
+                    $arguments = "seg-exit $($SegEnv['SEG_BACKHAUL_INTERFACE']) $($SegEnv['SEG_BACKHAUL_VPS1']) $($SegEnv['SEG_BACKHAUL_VPS2'])"
+                }
+
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/secure-seg.sh`n/root/secure-seg.sh $arguments"
+
+                if ($result.Output -notmatch "SECURE_SEG_OK role=$($node.Role)") {
+                    throw "secure-seg.sh did not report SECURE_SEG_OK on $($node.Name)"
+                }
+
+                return $true
+            }
+        }
+
+        if ($proceed) {
+            foreach ($node in $Nodes) {
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap and hardening completed; the remaining SEG stages are not implemented yet (roadmap items 14-20).'
             }
         }
     }

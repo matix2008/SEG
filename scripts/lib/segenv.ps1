@@ -1,5 +1,8 @@
 # SEG parameters loader and validator (config/seg.env, SEG.md section 6).
 # Keep this file ASCII-only: .ps1 files are read by Windows PowerShell 5.1.
+
+# sing-box version used on VPS2 and by the reference client (hashes: seg\sing-box.sha256).
+$script:SegSingBoxVersion = '1.14.4'
 
 $script:SegRealityFlows = @('xtls-rprx-vision')
 $script:SegRealityFingerprints = @('chrome', 'firefox', 'safari', 'ios', 'android', 'edge', '360', 'qq', 'random', 'randomized')
