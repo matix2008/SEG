@@ -1,4 +1,8 @@
 ﻿param(
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('VPN', 'SEG')]
+    [string]$Mode,
+
     [Parameter(Mandatory = $false, Position = 0)]
     [string]$ServerName,
 
@@ -8,6 +12,39 @@
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if (-not $PSBoundParameters.ContainsKey('Mode')) {
+    [Console]::Error.WriteLine('ERROR: parameter -Mode is required. Use -Mode VPN or -Mode SEG.')
+    exit 1
+}
+
+if ($Mode -eq 'SEG') {
+    $segScript = Join-Path $PSScriptRoot 'seg\sync-seg.ps1'
+
+    if (-not (Test-Path -LiteralPath $segScript)) {
+        [Console]::Error.WriteLine("ERROR: SEG mode is not available: $segScript was not found.")
+        exit 1
+    }
+
+    $segArgs = @{}
+    foreach ($key in $PSBoundParameters.Keys) {
+        if ($key -ne 'Mode') {
+            $segArgs[$key] = $PSBoundParameters[$key]
+        }
+    }
+
+    $global:LASTEXITCODE = 0
+
+    try {
+        & $segScript @segArgs
+    }
+    catch {
+        [Console]::Error.WriteLine("ERROR: $($_.Exception.Message)")
+        exit 1
+    }
+
+    exit $global:LASTEXITCODE
+}
 
 # ============================================================
 # Paths
@@ -1150,7 +1187,7 @@ function Initialize-Peers {
     $powerShellExe = (Get-Process -Id $PID).Path
 
     Write-Log -Level 'INFO' -Message 'Starting add-client.ps1 in a child PowerShell process.'
-    & $powerShellExe -NoProfile -ExecutionPolicy Bypass -File $AddClientFile
+    & $powerShellExe -NoProfile -ExecutionPolicy Bypass -File $AddClientFile -Mode VPN
     $childCode = $LASTEXITCODE
 
     if ($childCode -ne 0) {
