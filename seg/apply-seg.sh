@@ -43,7 +43,10 @@ trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 log START "Script started."
 
 [[ "${EUID}" -eq 0 ]] || die "apply-seg.sh must be run as root"
-[[ $# -eq 1 ]] || die "Usage: $0 failclosed"
+
+USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU>"
+
+[[ $# -ge 1 ]] || die "$USAGE"
 
 STAGE="$1"
 STAGING_DIR="/root/.seg-sync"
@@ -208,12 +211,119 @@ stage_failclosed()
     log OK "Fail-closed installed and verified."
 }
 
+# ------------------------------------------------------------
+# Stage routing (seg-gateway, item 15)
+# ------------------------------------------------------------
+# Selected traffic reaches the backhaul through sing-box bind_interface, not through routing tables:
+# the main table must stay as it is and the backhaul must not hold routes beyond its own subnet.
+# Reverse-path filtering must not be strict, or replies arriving from the backhaul are dropped.
+
+RP_DROPIN="/etc/sysctl.d/90-seg-rp-filter.conf"
+
+read_rp_filter()
+{
+    cat "/proc/sys/net/ipv4/conf/$1/rp_filter"
+}
+
+max_number()
+{
+    (( $1 >= $2 )) && echo "$1" || echo "$2"
+}
+
+stage_routing()
+{
+    local interface="$1"
+    local mtu="$2"
+
+    [[ "$interface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || die "Invalid backhaul interface: $interface"
+    [[ "$mtu" =~ ^[0-9]+$ ]] && (( mtu >= 576 && mtu <= 1500 )) || die "Invalid backhaul MTU: $mtu"
+
+    # 1. The main table is not changed: the default route leaves through the public interface.
+    local default_dev
+    default_dev="$(ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+
+    [[ -n "$default_dev" ]] || die "No IPv4 default route"
+    [[ "$default_dev" != "$interface" ]] || die "The default route uses the backhaul interface $interface"
+    log OK "Main table: the default route leaves through $default_dev."
+
+    if [[ -n "$(ip rule show | grep -vE 'lookup (local|main|default)$' || true)" ]]; then
+        log WARN "Policy routing rules exist besides the standard ones; SEG does not use them:"
+        ip rule show | grep -vE 'lookup (local|main|default)$' || true
+    else
+        log OK "No policy routing rules (SEG uses bind_interface, not ip rule)."
+    fi
+
+    local interface_exists=0
+    ip link show "$interface" >/dev/null 2>&1 && interface_exists=1
+
+    if [[ "$interface_exists" == "1" ]]; then
+        local extra
+        extra="$(ip -4 route show dev "$interface" | grep -v 'proto kernel' || true)"
+
+        [[ -z "$extra" ]] || die "The backhaul interface holds routes besides its own subnet (Table = off is required): $extra"
+        log OK "The backhaul interface holds only its own subnet route."
+
+        local actual_mtu
+        actual_mtu="$(cat "/sys/class/net/${interface}/mtu")"
+
+        if [[ "$actual_mtu" == "$mtu" ]]; then
+            log OK "Backhaul MTU is $mtu."
+        else
+            log WARN "Backhaul MTU is $actual_mtu, expected $mtu; the backhaul stage applies it."
+        fi
+    else
+        log INFO "Interface $interface does not exist yet; it is created by the backhaul stage."
+    fi
+
+    # 2. Reverse-path filtering: the effective value is the larger of 'all' and the interface value;
+    # an interface that does not exist yet inherits 'default'. 1 means strict.
+    local all_value default_value interface_value effective
+    all_value="$(read_rp_filter all)"
+    default_value="$(read_rp_filter default)"
+
+    if [[ "$interface_exists" == "1" ]]; then
+        interface_value="$(read_rp_filter "$interface")"
+    else
+        interface_value="$default_value"
+    fi
+
+    effective="$(max_number "$all_value" "$interface_value")"
+
+    if [[ "$effective" == "1" ]]; then
+        log WARN "rp_filter is strict for the backhaul (all=$all_value, interface=$interface_value); setting loose mode (2)."
+
+        cat >"$RP_DROPIN" <<'RP_EOF'
+# SEG: replies from the backhaul must not be dropped by strict reverse-path filtering.
+net.ipv4.conf.all.rp_filter=2
+net.ipv4.conf.default.rp_filter=2
+RP_EOF
+
+        sysctl -q -p "$RP_DROPIN"
+
+        if [[ "$interface_exists" == "1" ]]; then
+            sysctl -q -w "net.ipv4.conf.${interface}.rp_filter=2"
+        fi
+
+        all_value="$(read_rp_filter all)"
+        interface_value="$([[ "$interface_exists" == "1" ]] && read_rp_filter "$interface" || read_rp_filter default)"
+        effective="$(max_number "$all_value" "$interface_value")"
+    fi
+
+    [[ "$effective" != "1" ]] || die "rp_filter is still strict for the backhaul"
+    log OK "rp_filter is not strict for the backhaul (all=$all_value, interface=$interface_value, effective=$effective)."
+}
+
 case "$STAGE" in
     failclosed)
+        [[ $# -eq 1 ]] || die "$USAGE"
         stage_failclosed
         ;;
+    routing)
+        [[ $# -eq 3 ]] || die "$USAGE"
+        stage_routing "$2" "$3"
+        ;;
     *)
-        die "Unknown stage: $STAGE. Usage: $0 failclosed"
+        die "Unknown stage: $STAGE. $USAGE"
         ;;
 esac
 

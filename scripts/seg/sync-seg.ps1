@@ -404,9 +404,28 @@ try {
             }
         }
 
+        # ----------------------------------------------------
+        # Step 8 (item 27): routing of selected traffic on the gateway (apply-seg.sh routing)
+        # ----------------------------------------------------
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'routing' -Role 'seg-gateway' -Action {
+                param($node)
+
+                $arguments = "routing $($SegEnv['SEG_BACKHAUL_INTERFACE']) $($SegEnv['SEG_BACKHAUL_MTU'])"
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh $arguments"
+
+                if ($result.Output -notmatch 'APPLY_SEG_OK stage=routing') {
+                    throw "apply-seg.sh did not report APPLY_SEG_OK for routing on $($node.Name)"
+                }
+
+                return $true
+            }
+        }
+
         if ($proceed) {
             foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening and fail-closed completed; the remaining SEG stages are not implemented yet (roadmap items 15-20).'
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed and routing completed; the remaining SEG stages are not implemented yet (roadmap items 16-20).'
             }
         }
     }
