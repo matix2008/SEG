@@ -1,6 +1,6 @@
 # Client profile of SEG mode: rendering, structural verification and sing-box check (roadmap, items 21 and 25).
 # Keep this file ASCII-only: .ps1 files are read by Windows PowerShell 5.1.
-# Requires common.ps1, segenv.ps1, seglist.ps1 (dot-sourced by the caller).
+# Requires common.ps1, servers.ps1, segenv.ps1, seglist.ps1 and segclients.ps1 (dot-sourced by the caller).
 
 function Get-SegClientProfileValues {
     # Template values of the client profile for one client. Secrets stay in the values only; they are
@@ -242,6 +242,118 @@ function Test-SegClientProfile {
     if ($problems.Count -gt 0) {
         throw "Client profile problems:`n  - $($problems -join "`n  - ")"
     }
+}
+
+function Get-SegProjectContext {
+    # Loads and validates what every SEG client command needs: seg.env, seg-list.json and the SEG pair
+    # of servers.txt (current format, exactly one enabled gateway and exit). Throws a clear message otherwise.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root
+    )
+
+    $envFile = Join-Path $Root 'config\seg.env'
+    $listFile = Join-Path $Root 'config\seg-list.json'
+    $serversFile = Join-Path $Root 'servers.txt'
+
+    if (-not (Test-Path -LiteralPath $envFile)) {
+        throw "config\seg.env was not found. Run generate-server-env.ps1 -Mode SEG first."
+    }
+
+    foreach ($file in @($listFile, $serversFile)) {
+        if (-not (Test-Path -LiteralPath $file)) {
+            throw "Required file not found: $file"
+        }
+    }
+
+    $segEnv = Read-SegEnvFile -Path $envFile
+    Test-SegEnvironment -Env $segEnv -ReservedNetworks @(Get-SegReservedNetworks -VpnEnvFile (Join-Path $Root 'config\server.env'))
+
+    $segList = Read-SegList -Path $listFile
+    $loaded = Read-ServersFile -Path $serversFile
+
+    if ($loaded.Format -eq 'legacy') {
+        throw 'servers.txt uses the legacy format and has no SEG servers. Run sync-servers.ps1 -Mode VPN once to migrate it, then add the seg-gateway and seg-exit rows.'
+    }
+
+    $segServers = @(Select-ServersForMode -Servers @($loaded.Servers) -Mode SEG)
+    Assert-SegTopology -Servers $segServers
+
+    return [pscustomobject]@{
+        Env     = $segEnv
+        SegList = $segList
+        Gateway = @($segServers | Where-Object { $_.Role -eq 'seg-gateway' -and $_.IsEnabled })[0]
+        Exit    = @($segServers | Where-Object { $_.Role -eq 'seg-exit' -and $_.IsEnabled })[0]
+    }
+}
+
+function Write-SegClientProfile {
+    # Writes clients\generated\seg\<name>.json and its .meta.json (UTF-8 without BOM, LF). Both files are
+    # replaced through temporary files, so a failure leaves no half-written pair behind.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        $Client,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Env,
+
+        [Parameter(Mandatory = $true)]
+        $SegList,
+
+        [Parameter(Mandatory = $true)]
+        $Gateway
+    )
+
+    $paths = Get-SegProfilePaths -Root $Root -Name $Client.Name
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $paths.Profile) | Out-Null
+
+    $suffix = [guid]::NewGuid().ToString('N')
+    $profileTemp = "$($paths.Profile).$suffix.tmp"
+    $metaTemp = "$($paths.Meta).$suffix.tmp"
+
+    try {
+        [System.IO.File]::WriteAllText($profileTemp, $Text, (New-Object System.Text.UTF8Encoding($false)))
+
+        Save-SegProfileMeta `
+            -Path $metaTemp `
+            -SegListVersion $SegList.Version `
+            -SegListSha256 $SegList.Sha256 `
+            -ServerConfigSha256 (Get-SegConnectionSha256 -Vps2Ip ([string]$Gateway.IP) -Port ([string]$Gateway.Port) -Env $Env)
+
+        Move-Item -LiteralPath $profileTemp -Destination $paths.Profile -Force
+        Move-Item -LiteralPath $metaTemp -Destination $paths.Meta -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $profileTemp, $metaTemp -Force -ErrorAction SilentlyContinue
+    }
+
+    return $paths
+}
+
+function Save-SegClientProfile {
+    # Renders, verifies (structure and sing-box check) and writes the profile of an existing client.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        $Client,
+
+        [Parameter(Mandatory = $true)]
+        $Context
+    )
+
+    $text = New-SegClientProfileText -Root $Root -Env $Context.Env -SegList $Context.SegList -Client $Client -Gateway $Context.Gateway
+    Test-SegClientProfile -Text $text -Env $Context.Env -SegList $Context.SegList -Client $Client -Gateway $Context.Gateway -Exit $Context.Exit
+    Invoke-SingBoxClientCheck -Root $Root -Text $text
+
+    return (Write-SegClientProfile -Root $Root -Client $Client -Text $text -Env $Context.Env -SegList $Context.SegList -Gateway $Context.Gateway)
 }
 
 function Invoke-SingBoxClientCheck {
