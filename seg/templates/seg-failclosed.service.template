@@ -1,0 +1,16 @@
+[Unit]
+Description=SEG fail-closed firewall (nftables)
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target sing-box.service awg-quick@{{SEG_BACKHAUL_INTERFACE}}.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/seg/seg-failclosed.nft
+ExecReload=/usr/sbin/nft -f /etc/seg/seg-failclosed.nft
+ExecStop=/usr/sbin/nft delete table inet seg_failclosed
+
+[Install]
+WantedBy=multi-user.target

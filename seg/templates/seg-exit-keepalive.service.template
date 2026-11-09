@@ -1,0 +1,13 @@
+[Unit]
+Description=SEG exit: keep {{SEG_BACKHAUL_INTERFACE}} handshake fresh (data traffic to VPS2)
+After=awg-quick@{{SEG_BACKHAUL_INTERFACE}}.service
+Requires=awg-quick@{{SEG_BACKHAUL_INTERFACE}}.service
+PartOf=awg-quick@{{SEG_BACKHAUL_INTERFACE}}.service
+
+[Service]
+ExecStart=/bin/ping -i 5 -q {{SEG_BACKHAUL_VPS2}}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=sing-box (SEG gateway)
+After=network-online.target seg-failclosed.service awg-quick@{{SEG_BACKHAUL_INTERFACE}}.service
+Wants=network-online.target awg-quick@{{SEG_BACKHAUL_INTERFACE}}.service
+Requires=seg-failclosed.service
+
+[Service]
+User=sing-box
+Group=sing-box
+ExecStartPre=/usr/local/bin/sing-box check -c /etc/sing-box/config.json
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=sing-box
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

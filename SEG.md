@@ -462,6 +462,10 @@ Selected outbound использует `domain_resolver` на DNS VPS1 с `detou
 - Счётчик отображается в `-Check` как `UNMATCHED_DIRECT`: ненулевое значение означает, что клиент направляет на VPS2 трафик не по `seg-list`.
 - Отзыв UUID выполняется через `remove-client` и `sync`.
 
+Реализация счётчика (проверена на прототипе): direct outbound получает отдельную метку `routing_mark = 0x5e91` (не `SEG_MARK`, в `awg-backhaul` не попадает), а в цепочке `output` таблицы `seg_failclosed` стоит правило `meta mark 0x5e91 ct state new counter name "unmatched_direct"`. Значение читается командой `nft list counter inet seg_failclosed unmatched_direct`. Selected-трафик и REALITY-handshake счётчик не увеличивают: три прямых соединения дали `packets 3`, selected — 0. Счётчик обнуляется при перезагрузке таблицы и VPS2.
+
+Проверено: через VLESS заблокированы `127.0.0.1`, `169.254.169.254`, адреса backhaul (`10.77.0.1`, `10.77.0.2`), `10.0.0.0/8` и `192.168.0.0/16`, а также домены, резолвящиеся в такие адреса (`localtest.me` в `127.0.0.1`, `10.77.0.2.nip.io` в `10.77.0.2`): `sing-box` отклоняет соединение до исходящего подключения, в журнале нет ни одного outbound к этим адресам. Блокировка tcp/25 вне backhaul подтверждена ростом счётчика правила.
+
 ### DNS на VPS2
 
 ```text
@@ -474,6 +478,8 @@ Selected outbound использует `domain_resolver` на DNS VPS1 с `detou
 ```
 
 У selected outbound `domain_resolver` указывает только на resolver VPS1. При недоступности resolver VPS1 selected-запрос завершается ошибкой.
+
+Проверено на прототипе: при остановленном `unbound` на VPS1 selected-домен (`chatgpt.com`) не открывается (в журнале VPS2 ошибка `lookup chatgpt.com: read udp 10.77.0.1:…->10.77.0.2:53`), IP VPS2 для него не используется, домены вне `seg-list` продолжают работать через локальный резолвер VPS2. После запуска `unbound` selected-трафик восстанавливается без перезапуска `sing-box`.
 
 ## 13. Маршрутизация selected-трафика VPS2
 
@@ -503,9 +509,17 @@ main default
 
 Selected traffic не использует main table. Привязка `bind_interface` и правило nftables с меткой — два независимых уровня: привязка направляет трафик в backhaul, правило из раздела 14 не выпускает его в публичный интерфейс.
 
-Ответный трафик из backhaul приходит с внешними адресами не со стороны публичного интерфейса, поэтому `rp_filter` на VPS2 не должен отбрасывать его (loose или отключённый для `awg-backhaul`). В прототипе `rp_filter` не менялся и ответы проходили; проверка в нужной конфигурации остаётся за автоматизацией.
+Ответный трафик из backhaul приходит с внешними адресами не со стороны публичного интерфейса, поэтому `rp_filter` на VPS2 не должен отбрасывать его (loose или отключённый для `awg-backhaul`). На образе Ubuntu 24.04 `rp_filter = 2` (loose) для `all`, `default`, `eth0` и `awg-backhaul` уже задан в `/etc/sysctl.d/10-network-security.conf`, и ответы проходят. Автоматизация должна проверять значение и не ставить `1` (strict).
 
-MTU `awg-backhaul` и MSS clamp задаются явно и подтверждаются проверкой больших передач (в прототипе не выполнялась).
+MTU `awg-backhaul` задаётся явно (`SEG_BACKHAUL_MTU`), MSS clamp не нужен. Прототип показал:
+
+- внешний UDP-пакет AmneziaWG больше внутреннего на 20 (IPv4) + 8 (UDP) + 32 (заголовок) + `S4` (паддинг данных). При `S4 = 144` внутренний MTU не должен превышать `1500 − 28 − 32 − 144 = 1296`;
+- при MTU 1420 (по умолчанию) фрагментируются 100% пакетов большой передачи (IP-фрагменты на VPS1, повторная сборка на VPS2); при 1300 тоже; при 1296 и 1280 фрагментов нет (счётчики `IpFragCreates` и `IpReasmOKs` не растут, внешние пакеты 1400–1499 байт);
+- `RandomTrailers = on` добавляет к пакетам случайный хвост, и фрагментация остаётся даже при MTU 900 (доля фрагментированных пакетов падает с ростом запаса от 100% до ~24%, но не до нуля). Поэтому в backhaul прототипа `RandomTrailers = off` и `MTU = 1280` на обеих сторонах;
+- `MSS` TCP вычисляется из MTU интерфейса, к которому привязан сокет: при `bind_interface = awg-backhaul` клиент объявляет MSS 1240, а `MSS clamp` на VPS1 для транзитного трафика не потребовался;
+- MTU пути между VPS (1500) проверен пингом с DF; значение `SEG_BACKHAUL_MTU` нужно пересчитывать при изменении `S4` и при IPv6 внешнего транспорта (накладные расходы на 20 байт больше).
+
+Пропускная способность одного потока через backhaul при MTU 1280 в прототипе около 5–8 МБ/с (RTT VPS1–VPS2 около 155 мс).
 
 ## 14. Fail-closed VPS2
 
@@ -633,7 +647,7 @@ Backhaul использует собственные:
 - адреса;
 - порт.
 
-Параметры прототипа: сеть `10.77.0.0/30` (VPS2 `10.77.0.1`, VPS1 `10.77.0.2`), UDP-порт `42100` на VPS2. Параметры AmneziaWG (`Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4`, `RandomTrailers`) одинаковы на обеих сторонах. Сеть не пересекается с сетью клиентов AWG (`10.7.0.0/24`).
+Параметры прототипа: сеть `10.77.0.0/30` (VPS2 `10.77.0.1`, VPS1 `10.77.0.2`), UDP-порт `42100` на VPS2, `MTU = 1280`. Параметры AmneziaWG (`Jc`, `Jmin`, `Jmax`, `S1`–`S4`, `H1`–`H4`, `RandomTrailers`) одинаковы на обеих сторонах. `RandomTrailers = off`: при `on` внешние пакеты фрагментируются при любом практическом MTU (раздел 13), что нужно решить до выбора значения по умолчанию. Сеть не пересекается с сетью клиентов AWG (`10.7.0.0/24`).
 
 Восстановление после перезапуска. VPS1 только инициирует соединение, а VPS2 не знает его Endpoint. После перезапуска `awg-backhaul` на VPS2 туннель мог оставаться нерабочим до ~3 минут, пока VPS1 сам не начинал новый handshake (`PersistentKeepalive = 25` этого не исправляет). Решение: на VPS1 служба `seg-exit-keepalive.service` (`ping -i 5 10.77.0.1`, `PartOf=awg-quick@awg-backhaul`). Восстановление сократилось до ~19 секунд. Пока есть трафик, AmneziaWG переустанавливает сессию примерно раз в 2 минуты.
 
@@ -833,7 +847,7 @@ SECURITY
 - Ошибка настройки `bind_interface` или fail-closed может привести к утечке через VPS2.
 - Компрометация VPS2 раскрывает REALITY и backhaul credentials.
 - Компрометация VPS1 раскрывает backhaul credentials.
-- MTU/MSS требуют согласованной настройки backhaul.
+- MTU/MSS требуют согласованной настройки backhaul: при MTU по умолчанию (1420) внешние пакеты AmneziaWG фрагментируются (раздел 13).
 - UDP-приложения требуют поддержки UDP/XUDP.
 
 ## 26. Документация
@@ -850,7 +864,10 @@ SECURITY
 scripts\seg\*.ps1       SEG-логика (sync, клиенты, профили)
 scripts\lib\common.ps1  общие функции (SSH, лог, upgrade-этап)
 seg\*.sh                bootstrap-seg.sh, secure-seg.sh
+seg\templates\*         шаблоны {{VAR}} конфигураций SEG (backhaul, nftables, unbound, sing-box, systemd)
 ```
+
+Шаблоны получены из прототипа (раздел 28): отрисованные с значениями прототипа, они совпадают с работающими конфигурациями на VPS1 и VPS2, клиентский профиль проходит `sing-box check`. Имена переменных — параметры `seg.env` (`SEG_*`) и адреса из `servers.txt` (`VPS1_PUBLIC_IP`, `VPS2_PUBLIC_IP`); списки `seg-list` и пользователей подставляются как JSON-фрагменты (`SEG_DOMAIN_SUFFIX_JSON`, `SEG_CIDR_JSON`, `SEG_VLESS_USERS_JSON`). Политика `SEG_UNMATCHED_POLICY = block` в серверный шаблон ещё не включена и не проверялась (пункт 20).
 
 Конфигурации SEG формируются из шаблонов `{{VAR}}`, зафиксированных по результатам прототипа (roadmap, пункт 0). Порядок и принципы реализации описаны в `roadmap.md`.
 
@@ -879,6 +896,8 @@ seg\*.sh                bootstrap-seg.sh, secure-seg.sh
 5. Прямой DNS клиента на Windows — только DoH/DoT из-за `strict_route` (разделы 8, 10).
 6. `unbound` на VPS1 требует `unbound-anchor` и `root.key` (раздел 17).
 7. ICMP-ping VPS1 через backhaul не проходит; состояние проверяется по handshake и DNS (раздел 18).
+8. MTU `awg-backhaul` задаётся явно (1280), `RandomTrailers = off`; при значениях по умолчанию (MTU 1420, `RandomTrailers = on`) внешние пакеты фрагментируются (раздел 13).
+9. Счётчик `UNMATCHED_DIRECT` реализуется отдельной меткой `0x5e91` direct outbound (раздел 12).
 
 ### Команды проверки
 
@@ -888,7 +907,11 @@ seg\*.sh                bootstrap-seg.sh, secure-seg.sh
 VPS2: awg show awg-backhaul latest-handshakes     возраст handshake = date +%s минус значение
 VPS2: dig +short +time=5 +tries=1 @VPS1_BACKHAUL_IP example.com
 VPS2: curl -s -m 10 --interface awg-backhaul https://api.ipify.org     = IP VPS1
-VPS2: nft list chain inet seg_failclosed output     правило и счётчики
+VPS2: nft list counter inet seg_failclosed unmatched_direct     UNMATCHED_DIRECT
+VPS2: nft list chain inet seg_failclosed output     правила и счётчики
+VPS2: cat /sys/class/net/awg-backhaul/mtu     = SEG_BACKHAUL_MTU
+VPS2/VPS1: nstat -az IpFragCreates IpReasmOKs     не растут при большой передаче (нет фрагментации)
+VPS2: sysctl net.ipv4.conf.awg-backhaul.rp_filter     не равно 1
 VPS2: systemctl is-active seg-failclosed awg-quick@awg-backhaul sing-box
 VPS1: systemctl is-active seg-exit-fw awg-quick@awg-backhaul seg-exit-keepalive unbound
 клиент: sing-box check -c <профиль>
@@ -897,12 +920,8 @@ VPS1: systemctl is-active seg-exit-fw awg-quick@awg-backhaul seg-exit-keepalive 
 
 ### Не проверено
 
-- MTU, MSS и большие передачи через backhaul;
-- `rp_filter` на VPS2;
-- блокировка private, loopback и metadata на VPS2 отдельным тестом;
-- счётчик `UNMATCHED_DIRECT`;
-- поведение selected-трафика при недоступном DNS VPS1;
 - security hardening (`secure-seg.sh`) и UFW на VPS2;
 - IPv6;
 - UDP/XUDP через VLESS и поведение при ECH;
-- клиентский профиль для устаревшего `seg-list`.
+- клиентский профиль для устаревшего `seg-list`;
+- `RandomTrailers = on` с очень малым MTU (выбор между обфускацией и фрагментацией не принят).

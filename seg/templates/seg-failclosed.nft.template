@@ -1,0 +1,17 @@
+#!/usr/sbin/nft -f
+# SEG gateway (VPS2): fail-closed and unmatched-direct counter. Independent of UFW; loaded before sing-box.
+# {{SEG_MARK}} = selected traffic, {{SEG_UNMATCHED_MARK}} = direct outbound (counted only).
+
+table inet seg_failclosed
+delete table inet seg_failclosed
+
+table inet seg_failclosed {
+    counter unmatched_direct { }
+
+    chain output {
+        type filter hook output priority -100; policy accept;
+        meta mark {{SEG_MARK}} oifname != "{{SEG_BACKHAUL_INTERFACE}}" counter drop
+        meta mark {{SEG_UNMATCHED_MARK}} ct state new counter name "unmatched_direct"
+        oifname != "{{SEG_BACKHAUL_INTERFACE}}" oifname != "lo" tcp dport 25 counter drop
+    }
+}

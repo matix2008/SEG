@@ -1,0 +1,16 @@
+[Unit]
+Description=SEG exit firewall (nftables, {{SEG_BACKHAUL_INTERFACE}})
+After=network-pre.target
+Before=network.target awg-quick@{{SEG_BACKHAUL_INTERFACE}}.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/seg/seg-exit.nft
+ExecReload=/usr/sbin/nft -f /etc/seg/seg-exit.nft
+ExecStop=/usr/sbin/nft delete table inet seg_exit
+ExecStop=/usr/sbin/nft delete table ip seg_exit_nat
+
+[Install]
+WantedBy=multi-user.target

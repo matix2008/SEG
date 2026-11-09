@@ -1,0 +1,55 @@
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "type": "local", "tag": "dns-local" },
+      { "type": "udp", "tag": "dns-seg", "server": "{{SEG_BACKHAUL_VPS1}}", "server_port": 53, "detour": "seg-out" }
+    ],
+    "rules": [
+      { "domain_suffix": [{{SEG_DOMAIN_SUFFIX_JSON}}], "action": "route", "server": "dns-seg" }
+    ],
+    "final": "dns-local",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": {{SEG_VLESS_PORT}},
+      "users": [{{SEG_VLESS_USERS_JSON}}],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{SEG_REALITY_SERVER_NAME}}",
+        "reality": {
+          "enabled": true,
+          "handshake": { "server": "{{SEG_REALITY_SERVER_NAME}}", "server_port": 443 },
+          "private_key": "{{SEG_REALITY_PRIVATE_KEY}}",
+          "short_id": ["{{SEG_REALITY_SHORT_ID}}"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct", "routing_mark": "{{SEG_UNMATCHED_MARK}}" },
+    {
+      "type": "direct",
+      "tag": "seg-out",
+      "bind_interface": "{{SEG_BACKHAUL_INTERFACE}}",
+      "routing_mark": "{{SEG_MARK}}",
+      "domain_resolver": "dns-seg"
+    }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "ip_is_private": true, "action": "reject" },
+      { "domain_suffix": [{{SEG_DOMAIN_SUFFIX_JSON}}], "outbound": "seg-out" },
+      { "ip_cidr": [{{SEG_CIDR_JSON}}], "outbound": "seg-out" },
+      { "action": "resolve", "server": "dns-local" },
+      { "ip_is_private": true, "action": "reject" }
+    ],
+    "final": "direct",
+    "default_domain_resolver": "dns-local"
+  }
+}

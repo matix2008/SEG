@@ -1,0 +1,40 @@
+#!/usr/sbin/nft -f
+# SEG exit (VPS1): firewall for {{SEG_BACKHAUL_INTERFACE}}. Loaded alongside UFW (iptables-nft);
+# a DROP here is final, ACCEPT only passes this table, so UFW must still allow DNS and routing.
+
+table inet seg_exit
+delete table inet seg_exit
+
+table inet seg_exit {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname != "{{SEG_BACKHAUL_INTERFACE}}" accept
+        ct state established,related accept
+        iifname "{{SEG_BACKHAUL_INTERFACE}}" ip saddr {{SEG_BACKHAUL_VPS2}} ip daddr {{SEG_BACKHAUL_VPS1}} udp dport 53 accept
+        iifname "{{SEG_BACKHAUL_INTERFACE}}" ip saddr {{SEG_BACKHAUL_VPS2}} ip daddr {{SEG_BACKHAUL_VPS1}} tcp dport 53 accept
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+        iifname != "{{SEG_BACKHAUL_INTERFACE}}" accept
+        iifname "{{SEG_BACKHAUL_INTERFACE}}" ip saddr != {{SEG_BACKHAUL_VPS2}} counter drop
+        iifname "{{SEG_BACKHAUL_INTERFACE}}" ip daddr {
+            0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+            172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3,
+            {{VPS1_PUBLIC_IP}}
+        } counter drop
+        iifname "{{SEG_BACKHAUL_INTERFACE}}" oifname "{{SEG_BACKHAUL_INTERFACE}}" counter drop
+        iifname "{{SEG_BACKHAUL_INTERFACE}}" meta nfproto ipv6 counter drop
+    }
+}
+
+table ip seg_exit_nat
+delete table ip seg_exit_nat
+
+table ip seg_exit_nat {
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+        ip saddr {{SEG_BACKHAUL_VPS2}} oifname != "{{SEG_BACKHAUL_INTERFACE}}" masquerade
+    }
+}

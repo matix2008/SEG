@@ -1,0 +1,69 @@
+{
+  "log": { "level": "info", "output": "client-tun.log", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "type": "https", "tag": "dns-direct", "server": "8.8.8.8", "tls": { "server_name": "dns.google" } },
+      { "type": "fakeip", "tag": "dns-fakeip", "inet4_range": "198.18.0.0/15" }
+    ],
+    "rules": [
+      { "rule_set": ["seg-list"], "action": "route", "server": "dns-fakeip" }
+    ],
+    "final": "dns-direct",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "seg-tun",
+      "address": ["172.19.0.1/30"],
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "mixed"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "seg",
+      "server": "{{VPS2_PUBLIC_IP}}",
+      "server_port": {{SEG_VLESS_PORT}},
+      "uuid": "{{SEG_CLIENT_UUID}}",
+      "flow": "xtls-rprx-vision",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "{{SEG_REALITY_SERVER_NAME}}",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "{{SEG_REALITY_PUBLIC_KEY}}",
+          "short_id": "{{SEG_REALITY_SHORT_ID}}"
+        }
+      }
+    },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "ip_is_private": true, "outbound": "direct" },
+      { "rule_set": ["seg-list"], "network": "udp", "port": 443, "action": "reject" },
+      { "rule_set": ["seg-list"], "outbound": "seg" }
+    ],
+    "rule_set": [
+      {
+        "type": "inline",
+        "tag": "seg-list",
+        "rules": [
+          { "domain_suffix": [{{SEG_DOMAIN_SUFFIX_JSON}}] },
+          { "ip_cidr": [{{SEG_CIDR_JSON}}] }
+        ]
+      }
+    ],
+    "final": "direct",
+    "auto_detect_interface": true,
+    "default_domain_resolver": "dns-direct"
+  }
+}
