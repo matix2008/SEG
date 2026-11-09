@@ -44,7 +44,7 @@ log START "Script started."
 
 [[ "${EUID}" -eq 0 ]] || die "apply-seg.sh must be run as root"
 
-USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 backhaul <BACKHAUL_INTERFACE> <BACKHAUL_MTU>"
+USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 backhaul <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 egress <BACKHAUL_INTERFACE> <VPS1_BACKHAUL_IP> <VPS2_BACKHAUL_IP>"
 
 [[ $# -ge 1 ]] || die "$USAGE"
 
@@ -422,6 +422,7 @@ stage_backhaul()
        [[ "$BH_WAS_ACTIVE" == "1" && "$BH_WAS_ENABLED" == "1" ]] &&
        backhaul_state_ok "$BH_DST" "$interface" "$mtu" >/dev/null; then
         log OK "Backhaul $interface is already current."
+        ensure_keepalive
         return 0
     fi
 
@@ -447,8 +448,185 @@ stage_backhaul()
     problem="$(backhaul_state_ok "$BH_DST" "$interface" "$mtu" || true)"
     [[ -z "$problem" ]] || die "Backhaul check failed: $problem"
 
+    # The keepalive unit exists only on seg-exit; it needs the running backhaul.
+    ensure_keepalive
+
     ROLLBACK_ACTION=""
     log OK "Backhaul $interface installed and verified."
+}
+
+# ------------------------------------------------------------
+# Stage egress (seg-exit, item 17)
+# ------------------------------------------------------------
+# Firewall and NAT (nftables), the DNS resolver on the backhaul address and the keepalive unit.
+# The keepalive unit is enabled here and started by the backhaul stage (it requires the interface).
+
+EG_FILES=(
+    "seg-exit.nft:/etc/seg/seg-exit.nft"
+    "seg-exit-fw.service:/etc/systemd/system/seg-exit-fw.service"
+    "seg-exit-keepalive.service:/etc/systemd/system/seg-exit-keepalive.service"
+    "unbound-seg.conf:/etc/unbound/unbound.conf.d/seg.conf"
+)
+
+EG_WAS_FW_ACTIVE=0
+EG_WAS_UNBOUND_ACTIVE=0
+EG_WAS_FW_ENABLED=0
+
+ensure_keepalive()
+{
+    if [[ -f /etc/systemd/system/seg-exit-keepalive.service ]]; then
+        systemctl enable --now seg-exit-keepalive.service >/dev/null
+        systemctl is-active --quiet seg-exit-keepalive.service || die "seg-exit-keepalive.service is not active"
+        log OK "seg-exit-keepalive.service is active."
+    fi
+}
+
+egress_state_ok()
+{
+    # egress_state_ok <interface> <vps1 backhaul ip> <vps2 backhaul ip>: prints the first mismatch.
+    local interface="$1" vps1="$2" vps2="$3"
+    local unit listing
+
+    for unit in seg-exit-fw.service seg-exit-keepalive.service unbound.service; do
+        systemctl is-enabled --quiet "$unit" 2>/dev/null || { echo "$unit is not enabled"; return 1; }
+    done
+
+    for unit in seg-exit-fw.service unbound.service; do
+        systemctl is-active --quiet "$unit" || { echo "$unit is not active"; return 1; }
+    done
+
+    listing="$(nft list table inet seg_exit 2>/dev/null)" || { echo "table seg_exit is missing"; return 1; }
+
+    grep -Fq "ip saddr ${vps2} ip daddr ${vps1} udp dport 53 accept" <<<"$listing" || { echo "the DNS udp rule is missing"; return 1; }
+    grep -Fq "ip saddr ${vps2} ip daddr ${vps1} tcp dport 53 accept" <<<"$listing" || { echo "the DNS tcp rule is missing"; return 1; }
+    grep -Fq "iifname \"${interface}\" meta nfproto ipv6 counter" <<<"$listing" || { echo "the IPv6 drop rule is missing"; return 1; }
+
+    listing="$(nft list table ip seg_exit_nat 2>/dev/null)" || { echo "table seg_exit_nat is missing"; return 1; }
+
+    grep -Fq "ip saddr ${vps2} oifname != \"${interface}\" masquerade" <<<"$listing" || { echo "the masquerade rule is missing"; return 1; }
+
+    ss -H -lnu 'sport = :53' | grep -Fq "${vps1}:53" || { echo "unbound does not listen on ${vps1}:53 (udp)"; return 1; }
+    ss -H -lnt 'sport = :53' | grep -Fq "${vps1}:53" || { echo "unbound does not listen on ${vps1}:53 (tcp)"; return 1; }
+
+    [[ "$(sysctl -n net.ipv4.ip_forward)" == "1" ]] || { echo "IPv4 forwarding is off"; return 1; }
+
+    return 0
+}
+
+rollback_egress()
+{
+    local pair destination
+
+    for pair in "${EG_FILES[@]}"; do
+        restore_file "${pair#*:}"
+    done
+
+    systemctl daemon-reload
+
+    if [[ -f /etc/seg/seg-exit.nft && -f /etc/systemd/system/seg-exit-fw.service ]]; then
+        # Previous version: load it again, never leave the node without the firewall.
+        nft -f /etc/seg/seg-exit.nft
+    else
+        systemctl disable --now seg-exit-fw.service >/dev/null 2>&1 || true
+        nft delete table inet seg_exit >/dev/null 2>&1 || true
+        nft delete table ip seg_exit_nat >/dev/null 2>&1 || true
+        systemctl disable seg-exit-keepalive.service >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$EG_WAS_UNBOUND_ACTIVE" == "1" ]]; then
+        systemctl restart unbound.service || true
+    fi
+}
+
+stage_egress()
+{
+    local interface="$1" vps1="$2" vps2="$3"
+    local pair source destination changed=0
+
+    [[ "$interface" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || die "Invalid backhaul interface: $interface"
+
+    local address
+    for address in "$vps1" "$vps2"; do
+        [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "Invalid backhaul address: $address"
+    done
+
+    for pair in "${EG_FILES[@]}"; do
+        source="${STAGING_DIR}/${pair%%:*}"
+
+        [[ -f "$source" ]] || die "$source not found"
+        check_unresolved "$source"
+    done
+
+    log OK "No unresolved template variables found."
+
+    [[ -s /var/lib/unbound/root.key ]] || die "/var/lib/unbound/root.key is missing (bootstrap-seg.sh prepares it)"
+
+    nft -c -f "${STAGING_DIR}/seg-exit.nft"
+    log OK "nftables candidate validated (nft -c)."
+
+    unbound-checkconf "${STAGING_DIR}/unbound-seg.conf" >/dev/null
+    log OK "unbound candidate validated (unbound-checkconf)."
+
+    systemctl is-active --quiet seg-exit-fw.service && EG_WAS_FW_ACTIVE=1 || true
+    systemctl is-enabled --quiet seg-exit-fw.service 2>/dev/null && EG_WAS_FW_ENABLED=1 || true
+    systemctl is-active --quiet unbound.service && EG_WAS_UNBOUND_ACTIVE=1 || true
+
+    for pair in "${EG_FILES[@]}"; do
+        same_file "${STAGING_DIR}/${pair%%:*}" "${pair#*:}" || changed=1
+    done
+
+    if [[ "$changed" == "0" ]] && egress_state_ok "$interface" "$vps1" "$vps2" >/dev/null; then
+        log OK "Egress configuration is already current."
+
+        for pair in "${EG_FILES[@]}"; do
+            rm -f "${STAGING_DIR}/${pair%%:*}"
+        done
+
+        return 0
+    fi
+
+    for pair in "${EG_FILES[@]}"; do
+        backup_file "${pair#*:}"
+    done
+
+    ROLLBACK_ACTION=rollback_egress
+
+    install -d -o root -g root -m 755 /etc/seg /etc/unbound/unbound.conf.d
+
+    for pair in "${EG_FILES[@]}"; do
+        install -o root -g root -m 644 "${STAGING_DIR}/${pair%%:*}" "${pair#*:}"
+    done
+
+    # The firewall is loaded first, so the DNS resolver and the backhaul never run without it.
+    systemctl daemon-reload
+    systemctl enable seg-exit-fw.service seg-exit-keepalive.service unbound.service >/dev/null
+
+    # reload replaces both tables in one nftables transaction; restart would delete them first (ExecStop).
+    if [[ "$EG_WAS_FW_ACTIVE" == "1" ]]; then
+        systemctl reload seg-exit-fw.service
+    else
+        systemctl start seg-exit-fw.service
+    fi
+
+    sysctl -q -w net.ipv4.ip_forward=1
+
+    if [[ "$EG_WAS_UNBOUND_ACTIVE" == "1" ]]; then
+        systemctl restart unbound.service
+    else
+        systemctl start unbound.service
+    fi
+
+    local problem
+    problem="$(egress_state_ok "$interface" "$vps1" "$vps2" || true)"
+    [[ -z "$problem" ]] || die "Egress check failed: $problem"
+
+    ROLLBACK_ACTION=""
+
+    for pair in "${EG_FILES[@]}"; do
+        rm -f "${STAGING_DIR}/${pair%%:*}"
+    done
+
+    log OK "Egress (firewall, NAT, DNS) installed and verified."
 }
 
 case "$STAGE" in
@@ -463,6 +641,10 @@ case "$STAGE" in
     backhaul)
         [[ $# -eq 3 ]] || die "$USAGE"
         stage_backhaul "$2" "$3"
+        ;;
+    egress)
+        [[ $# -eq 4 ]] || die "$USAGE"
+        stage_egress "$2" "$3" "$4"
         ;;
     *)
         die "Unknown stage: $STAGE. $USAGE"

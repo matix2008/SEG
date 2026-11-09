@@ -328,6 +328,22 @@ try {
             -Directory $temp `
             -Name "$backhaulInterface.conf"
 
+        # The exit candidates go to their own directory: the backhaul candidate has the same file name.
+        $exitDir = Join-Path $temp 'exit'
+        New-Item -ItemType Directory -Path $exitDir | Out-Null
+
+        $backhaulExitFile = New-RenderedFile `
+            -TemplatePath (Join-Path $TemplatesDir 'awg-backhaul-vps1.conf.template') `
+            -Values $templateValues `
+            -Directory $exitDir `
+            -Name "$backhaulInterface.conf"
+
+        $egressFiles = @(
+            foreach ($template in @('seg-exit.nft', 'seg-exit-fw.service', 'seg-exit-keepalive.service', 'unbound-seg.conf')) {
+                New-RenderedFile -TemplatePath (Join-Path $TemplatesDir "$template.template") -Values $templateValues -Directory $exitDir
+            }
+        )
+
         $proceed = Invoke-PairStage -Title 'upgrade' -Action {
             param($node)
 
@@ -453,9 +469,48 @@ try {
             }
         }
 
+        # ----------------------------------------------------
+        # Step 10 (item 27): firewall, NAT, DNS and backhaul on the exit
+        # ----------------------------------------------------
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'egress-exit' -Role 'seg-exit' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($applyCopy)
+                Invoke-Remote -IP $node.IP -Command 'install -d -o root -g root -m 700 /root/.seg-sync' -Quiet | Out-Null
+                Copy-ToServer -IP $node.IP -Files $egressFiles -Destination '/root/.seg-sync/'
+
+                $arguments = "egress $backhaulInterface $($SegEnv['SEG_BACKHAUL_VPS1']) $($SegEnv['SEG_BACKHAUL_VPS2'])"
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh $arguments"
+
+                if ($result.Output -notmatch 'APPLY_SEG_OK stage=egress') {
+                    throw "apply-seg.sh did not report APPLY_SEG_OK for egress on $($node.Name)"
+                }
+
+                return $true
+            }
+        }
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'backhaul-exit' -Role 'seg-exit' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($backhaulExitFile) -Destination '/root/.seg-sync/'
+
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh backhaul $backhaulInterface $backhaulMtu"
+
+                if ($result.Output -notmatch 'APPLY_SEG_OK stage=backhaul') {
+                    throw "apply-seg.sh did not report APPLY_SEG_OK for backhaul on $($node.Name)"
+                }
+
+                return $true
+            }
+        }
+
         if ($proceed) {
             foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed, routing and the gateway backhaul completed; the remaining SEG stages are not implemented yet (roadmap items 17-20).'
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed, routing, both backhaul sides and the exit egress completed; the remaining SEG stages are not implemented yet (roadmap items 18-20).'
             }
         }
     }
