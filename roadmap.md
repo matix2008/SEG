@@ -197,47 +197,54 @@ README обновляется на каждом шаге.
 Name;IP;Port;Role;Type;Enabled
 ```
 
-Роли:
+Роли (определяют, каким режимом управляется хост; один хост принадлежит ровно одному режиму):
 
 ```text
-vpn-server
-seg-gateway
-seg-exit
+vpn-server     режим VPN
+seg-gateway    режим SEG, входная точка
+seg-exit       режим SEG, точка выхода
 ```
 
-Типы:
+`Type`:
 
 ```text
-amnezia
-openvpn
-sing-box
-...
+vpn-server    одно значение: протокол VPN-сервиса (amnezia, позже openvpn).
+seg-gateway   одно или несколько значений через запятую: типы приёмной
+              стороны backhaul на gateway (sing-box подразумевается ролью).
+seg-exit      одно значение: тип клиента backhaul, из списка Type gateway.
 ```
+
+Допустимые значения: `amnezia` (позже `openvpn` и другие); `sing-box` в `Type` не допускается. Реализованы только типы, поддерживаемые режимом (сейчас везде `amnezia`). Разделитель списка — запятая без пробелов.
 
 Пример:
 
 ```text
 vpn-01;151.236.30.153;42157;vpn-server;amnezia;true
-seg-ru;1.2.3.4;443;seg-gateway;sing-box;true
+seg-ru;1.2.3.4;443;seg-gateway;amnezia;true
 seg-eu;5.6.7.8;;seg-exit;amnezia;true
 ```
 
 Семантика `Port`:
 
 ```text
-vpn-server + amnezia
-  → публичный UDP-порт VPN.
+vpn-server
+  → публичный порт VPN-сервиса (amnezia: UDP).
 
-seg-gateway + sing-box
+seg-gateway
   → публичный TCP-порт VLESS/REALITY.
 
 seg-exit
   → Port пустой.
 ```
 
-Порт backhaul в `servers.txt` не хранится.
+Порт backhaul в `servers.txt` не хранится (`seg.env`, `SEG_BACKHAUL_PORT`).
 
-Валидатор `servers.txt` допускает пустой `Port` только для `seg-exit` и не включает его в проверку уникальности портов.
+Валидатор `servers.txt`:
+
+- допускает пустой `Port` только для `seg-exit` и не включает его в проверку уникальности портов;
+- требует непустой `Type` у всех ролей, допустимого для роли;
+- проверяет, что `Type` каждого `seg-exit` входит в список `Type` у `seg-gateway`;
+- в режиме SEG требует ровно один enabled `seg-gateway` и один enabled `seg-exit` (формат допускает больше, первая версия — нет).
 
 Обновить README: формат `servers.txt`, роли, типы, семантика `Port`.
 
@@ -265,6 +272,8 @@ SEG-серверы режимом VPN не обрабатываются.
 ровно 1 enabled Role = seg-gateway
 ровно 1 enabled Role = seg-exit
 ```
+
+Серверы с `Role = vpn-server` режимом SEG не обрабатываются.
 
 ```text
 Target = all
@@ -643,14 +652,14 @@ VPS1 = Role seg-exit
 Поддержать:
 
 ```text
-SEG + seg-gateway + sing-box
-SEG + seg-exit + amnezia
+SEG + seg-gateway (sing-box + backhaul amnezia)
+SEG + seg-exit (клиент backhaul amnezia)
 ```
 
-Для:
+Для `seg-exit` (клиент backhaul amnezia):
 
 ```text
-SEG + seg-exit + amnezia
+SEG + seg-exit (Type = amnezia)
 ```
 
 не создавать клиентский VPN-интерфейс `awg0`.
@@ -1170,8 +1179,8 @@ SECURITY=OK
 Использовать:
 
 ```text
-VPS2 = seg-gateway + sing-box
-VPS1 = seg-exit + amnezia
+VPS2 = seg-gateway (Type = amnezia)
+VPS1 = seg-exit (Type = amnezia)
 ```
 
 Проверить полный deploy из локального source of truth.

@@ -75,10 +75,10 @@ Client → seg-gateway → seg-exit → Internet
 
 ```text
 seg-gateway:
-  Type = sing-box
+  sing-box (VLESS/REALITY) + приёмная сторона backhaul типа amnezia
 
 seg-exit:
-  Type = amnezia
+  клиент backhaul типа amnezia
 ```
 
 ## 4. Модель серверов
@@ -92,25 +92,30 @@ Name;IP;Port;Role;Type;Enabled
 Роли:
 
 ```text
-vpn-server
-seg-gateway
-seg-exit
+vpn-server     сервер режима VPN
+seg-gateway    входная точка режима SEG
+seg-exit       точка выхода режима SEG
 ```
 
-Типы:
+Роль определяет, каким режимом управляется хост: один хост принадлежит ровно одному режиму. Режим VPN обрабатывает только `vpn-server` и игнорирует остальные роли, режим SEG обрабатывает только `seg-gateway` и `seg-exit` и игнорирует `vpn-server`. Так рабочие VPN-серверы и SEG-узлы могут лежать в одном `servers.txt`, а `secure.sh` режима VPN не закрывает порт VLESS gateway.
+
+`Type` показывает, какой VPN-протокол используется на сервере:
 
 ```text
-amnezia
-openvpn
-sing-box
-...
+vpn-server    одно значение: протокол VPN-сервиса для клиентов.
+seg-gateway   одно или несколько значений через запятую: типы приёмной
+              стороны backhaul, установленные на gateway.
+seg-exit      одно значение: тип клиента backhaul; должно входить
+              в список Type seg-gateway.
 ```
+
+Значения `Type`: `amnezia`, позже `openvpn` и другие. `sing-box` в `Type` не допускается: он подразумевается ролью `seg-gateway`. Допускаются только типы, реализованные в соответствующем режиме (сейчас везде только `amnezia`). Разделитель списка — запятая без пробелов, так как `;` разделяет поля.
 
 Пример:
 
 ```text
 vpn-01;151.236.30.153;42157;vpn-server;amnezia;true
-seg-ru;1.2.3.4;443;seg-gateway;sing-box;true
+seg-ru;1.2.3.4;443;seg-gateway;amnezia;true
 seg-eu;5.6.7.8;;seg-exit;amnezia;true
 ```
 
@@ -122,7 +127,7 @@ seg-eu;5.6.7.8;;seg-exit;amnezia;true
 Role = vpn-server
 ```
 
-`all` означает все enabled `vpn-server`.
+`all` означает все enabled `vpn-server`. Тип определяет, какой VPN устанавливается на сервер.
 
 ### SEG
 
@@ -136,6 +141,8 @@ Role = vpn-server
 `all` означает всю SEG-пару.
 
 `vpn-server` в SEG не используется.
+
+Формат допускает несколько `seg-exit` и несколько типов backhaul у gateway, но первая версия ограничена одним gateway и одним exit с типом `amnezia`. Несколько exit потребуют правил выбора exit в `seg-list`, раздельных адресов backhaul (сеть `/30` рассчитана на одного peer) и отдельных ключей на каждый exit; формат `servers.txt` при этом не меняется.
 
 ### Совместимость со старым форматом
 
@@ -151,26 +158,35 @@ Name;IP;Port;Enabled
 
 Пустой `Port` допустим только для `seg-exit` и не участвует в проверке уникальности портов.
 
+### Проверки валидатора
+
+- допустимые роли и типы для роли (см. выше); непустой `Type` обязателен для всех ролей;
+- `seg-exit.Type` входит в список `seg-gateway.Type`;
+- для каждого типа из списка gateway в `seg.env` задан порт backhaul (для `amnezia` — `SEG_BACKHAUL_PORT`);
+- в режиме SEG ровно один enabled `seg-gateway` и один enabled `seg-exit`.
+
 ## 5. Порты
 
 `servers.txt.Port` означает публичный сервисный порт роли.
 
 ```text
-vpn-server + amnezia
-  → UDP-порт VPN.
+vpn-server
+  → публичный порт VPN-сервиса (для amnezia — UDP).
 
-seg-gateway + sing-box
+seg-gateway
   → TCP-порт VLESS/REALITY.
 
 seg-exit
   → пусто.
 ```
 
-Backhaul-порт хранится:
+Порт приёмной стороны backhaul хранится не в `servers.txt`, а в `seg.env`:
 
 ```text
-SEG_BACKHAUL_PORT
+SEG_BACKHAUL_PORT     порт для типа amnezia (единственный тип первой версии)
 ```
+
+В одной ячейке `Port` уместно только одно значение, а типов backhaul у gateway может быть несколько. При добавлении второго типа порт задаётся отдельным параметром на тип (например `SEG_BACKHAUL_PORT_OPENVPN`), параметры AmneziaWG остаются у типа `amnezia`.
 
 Фаервол по ролям (`secure.sh`):
 
@@ -570,11 +586,7 @@ selected traffic → public interface VPS2
 
 ## 15. VPS1 — `seg-exit`
 
-Первая реализация:
-
-```text
-Type = amnezia
-```
+Первая реализация: клиент backhaul типа `amnezia` (`Type = amnezia` в `servers.txt`). Тип должен входить в список `Type` у `seg-gateway`.
 
 На VPS1 не создаётся:
 
