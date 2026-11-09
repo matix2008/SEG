@@ -724,6 +724,43 @@ function Invoke-Remote {
     }
 }
 
+function Invoke-RemoteScript {
+    # Runs a local shell script on the node without uploading it: the script travels base64-encoded inside the
+    # ssh command and runs from a pipe. For read-only checks that must leave nothing on the node.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$IP,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$Arguments = @(),
+
+        [switch]$AllowFailure,
+
+        [switch]$Quiet
+    )
+
+    foreach ($argument in $Arguments) {
+        if ($argument -cnotmatch '^[A-Za-z0-9_.:/@=+-]+$') {
+            throw "Unsafe argument for a remote script: $argument"
+        }
+    }
+
+    $text = (Get-Content -LiteralPath $ScriptPath -Raw) -replace "`r`n", "`n" -replace "`r", "`n"
+    $encoded = [Convert]::ToBase64String((New-Object System.Text.UTF8Encoding($false)).GetBytes($text))
+    $name = [System.IO.Path]::GetFileName($ScriptPath)
+
+    $command = "SEG_SCRIPT_NAME=$name bash <(printf '%s' '$encoded' | base64 -d) $($Arguments -join ' ')"
+
+    if ($command.Length -gt 30000) {
+        throw "The script $name is too large to send in one ssh command ($($command.Length) characters)."
+    }
+
+    return (Invoke-Remote -IP $IP -Command $command -AllowFailure:$AllowFailure -Quiet:$Quiet)
+}
+
 function Copy-ToServer {
     param(
         [Parameter(Mandatory = $true)]

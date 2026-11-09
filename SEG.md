@@ -960,7 +960,7 @@ scripts\lib\segenv.ps1  загрузчик и валидатор config/seg.env 
 scripts\lib\seglist.ps1 загрузчик и валидатор config/seg-list.json, SHA-256, генерация rule_set (SEG-скрипты)
 scripts\lib\segclients.ps1 хранение SEG-клиентов (clients\seg), пользователи VLESS для VPS2, метаданные профилей (SEG-скрипты)
 scripts\lib\segprofile.ps1 клиентский профиль: подстановка шаблона, структурная проверка, sing-box check (SEG-скрипты)
-seg\*.sh                bootstrap-seg.sh, secure-seg.sh, apply-seg.sh (этапы настройки узлов с откатом: failclosed, routing, backhaul, egress, singbox), check-backhaul.sh (проверка backhaul, только чтение)
+seg\*.sh                bootstrap-seg.sh, secure-seg.sh, apply-seg.sh (этапы настройки узлов с откатом: failclosed, routing, backhaul, egress, singbox), check-backhaul.sh (проверка backhaul, только чтение), check-node.sh (состояние узла, только чтение)
 seg\templates\*         шаблоны {{VAR}} конфигураций SEG (backhaul, nftables, unbound, sing-box, systemd)
 ```
 

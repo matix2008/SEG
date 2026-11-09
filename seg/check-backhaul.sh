@@ -8,7 +8,7 @@
 # the failing checks are listed with [ERROR] and the exit code is 1.
 set -Eeuo pipefail
 
-SCRIPT_NAME="$(basename "$0")"
+SCRIPT_NAME="${SEG_SCRIPT_NAME:-$(basename "$0")}"
 
 log()
 {

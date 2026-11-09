@@ -54,6 +54,7 @@ $BootstrapFile = Join-Path $Root 'seg\bootstrap-seg.sh'
 $SecureFile   = Join-Path $Root 'seg\secure-seg.sh'
 $ApplyFile    = Join-Path $Root 'seg\apply-seg.sh'
 $CheckBackhaulFile = Join-Path $Root 'seg\check-backhaul.sh'
+$CheckNodeFile = Join-Path $Root 'seg\check-node.sh'
 $TemplatesDir = Join-Path $Root 'seg\templates'
 
 $RequiredTemplates = @(
@@ -74,7 +75,7 @@ $RequiredTemplates = @(
 # Step 1 (item 27): local configuration
 # ============================================================
 
-$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, $BootstrapFile, $SecureFile, $ApplyFile, $CheckBackhaulFile, (Join-Path $Root 'seg\sing-box.sha256')) +
+$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, $BootstrapFile, $SecureFile, $ApplyFile, $CheckBackhaulFile, $CheckNodeFile, (Join-Path $Root 'seg\sing-box.sha256')) +
     @($RequiredTemplates | ForEach-Object { Join-Path $TemplatesDir $_ })
 
 foreach ($file in $requiredFiles) {
@@ -268,36 +269,224 @@ function Invoke-BackhaulCheck {
     }
 }
 
-function Get-SegNodeBaseInfo {
-    # Read-only: OS, running kernel and the pending-reboot flag.
+function New-SegCandidates {
+    # Step 6 (item 27): renders the candidate configurations of both nodes into the directory, before any node
+    # is changed (a template error stops the run early). Sets the script variables used by the stages and
+    # by -Check (the hashes of the candidates are compared with the installed files).
     param(
         [Parameter(Mandatory = $true)]
-        [string]$IP
+        [string]$TempDirectory
     )
 
-    $command = @'
-. /etc/os-release
-echo "OS=${ID:-unknown} ${VERSION_ID:-unknown}"
-echo "KERNEL=$(uname -r)"
-if [ -f /var/run/reboot-required ]; then echo "REBOOT_REQUIRED=yes"; else echo "REBOOT_REQUIRED=no"; fi
-'@
+    $values = @{}
 
-    $result = Invoke-Remote -IP $IP -Command $command -Quiet
-    $info = @{}
+    foreach ($key in $SegEnv.Keys) {
+        $values[$key] = $SegEnv[$key]
+    }
 
-    foreach ($line in ($result.Output -split "`n")) {
-        if ($line -match '^(OS|KERNEL|REBOOT_REQUIRED)=(.*)$') {
-            $info[$Matches[1]] = $Matches[2].Trim()
+    $values['VPS1_PUBLIC_IP'] = $Exit.IP
+    $values['VPS2_PUBLIC_IP'] = $Gateway.IP
+    $values['SEG_VLESS_PORT'] = [string]$Gateway.Port
+
+    $destination = [string]$SegEnv['SEG_REALITY_DEST']
+    $values['SEG_REALITY_DEST_HOST'] = $destination.Substring(0, $destination.LastIndexOf(':'))
+    $values['SEG_REALITY_DEST_PORT'] = $destination.Substring($destination.LastIndexOf(':') + 1)
+
+    $values['SEG_VLESS_USERS_JSON'] = ConvertTo-SegVlessUsersJson -Clients $SegClients -Flow $SegEnv['SEG_REALITY_FLOW']
+    $values['SEG_POLICY_RULES_JSON'] = Get-SegPolicyRulesJson -Policy $SegEnv['SEG_UNMATCHED_POLICY']
+
+    $fragments = Get-SegRuleSetFragments -SegList $SegList
+
+    foreach ($key in $fragments.Keys) {
+        $values[$key] = $fragments[$key]
+    }
+
+    $script:templateValues = $values
+    $script:backhaulInterface = $SegEnv['SEG_BACKHAUL_INTERFACE']
+    $script:backhaulMtu = $SegEnv['SEG_BACKHAUL_MTU']
+
+    $script:failClosedFiles = @(
+        New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.nft.template') -Values $values -Directory $TempDirectory
+        New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.service.template') -Values $values -Directory $TempDirectory
+    )
+
+    # The staged name is <interface>.conf: apply-seg.sh backhaul reads it by the interface name.
+    $script:backhaulGatewayFile = New-RenderedFile `
+        -TemplatePath (Join-Path $TemplatesDir 'awg-backhaul-vps2.conf.template') `
+        -Values $values `
+        -Directory $TempDirectory `
+        -Name "$($script:backhaulInterface).conf"
+
+    # The exit candidates go to their own directory: the backhaul candidate has the same file name.
+    $exitDir = Join-Path $TempDirectory 'exit'
+    New-Item -ItemType Directory -Path $exitDir | Out-Null
+
+    $script:backhaulExitFile = New-RenderedFile `
+        -TemplatePath (Join-Path $TemplatesDir 'awg-backhaul-vps1.conf.template') `
+        -Values $values `
+        -Directory $exitDir `
+        -Name "$($script:backhaulInterface).conf"
+
+    $script:egressFiles = @(
+        foreach ($template in @('seg-exit.nft', 'seg-exit-fw.service', 'seg-exit-keepalive.service', 'unbound-seg.conf')) {
+            New-RenderedFile -TemplatePath (Join-Path $TemplatesDir "$template.template") -Values $values -Directory $exitDir
+        }
+    )
+
+    # The server configuration must be valid JSON before it leaves the laptop; sing-box check itself runs
+    # on the gateway with the Linux binary (the Windows build rejects routing_mark).
+    $script:singBoxConfigFile = New-RenderedFile `
+        -TemplatePath (Join-Path $TemplatesDir 'sing-box-vps2.json.template') `
+        -Values $values `
+        -Directory $TempDirectory `
+        -Name 'sing-box-config.json'
+
+    try {
+        [void]([System.IO.File]::ReadAllText($script:singBoxConfigFile) | ConvertFrom-Json)
+    }
+    catch {
+        throw "The rendered sing-box configuration is not valid JSON: $($_.Exception.Message)"
+    }
+
+    $script:singBoxFiles = @(
+        $script:singBoxConfigFile
+        New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'sing-box.service.template') -Values $values -Directory $TempDirectory
+    )
+}
+
+function Get-FileSha256Lf {
+    # SHA-256 of a rendered candidate (they are written with LF line endings).
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function ConvertFrom-CheckOutput {
+    # Parses the "CHECK NAME=value" and "CHECK FILE path=sha256" lines of check-node.sh and check-backhaul.sh.
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    $values = @{}
+    $files = @{}
+
+    foreach ($line in ($Text -split "`n")) {
+        $line = $line.TrimEnd("`r")
+
+        if ($line -match '^CHECK FILE (\S+)=(\S+)$') {
+            $files[$Matches[1]] = $Matches[2]
+        }
+        elseif ($line -match '^CHECK ([A-Z0-9_]+)=(.*)$') {
+            $values[$Matches[1]] = $Matches[2].Trim()
         }
     }
 
-    foreach ($key in @('OS', 'KERNEL', 'REBOOT_REQUIRED')) {
-        if (-not $info.ContainsKey($key)) {
-            throw "Unable to read $key from $IP"
+    return [pscustomobject]@{ Values = $values; Files = $files }
+}
+
+function Get-SegNodeCheck {
+    # Read-only state of one node (check-node.sh through ssh, nothing is uploaded) against the candidates.
+    # State: READY, CHANGES (installed files differ from the local source of truth), DEGRADED (something that
+    # should work does not), NEW (nothing installed). Security is reported separately.
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Node,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Expected
+    )
+
+    if ($Node.Role -eq 'seg-gateway') {
+        $arguments = @('seg-gateway', [string]$Node.Port, [string]$SegEnv['SEG_BACKHAUL_PORT'], [string]$Exit.IP, [string]$SegEnv['SEG_BACKHAUL_INTERFACE'], $SingBoxVersion)
+    }
+    else {
+        $arguments = @('seg-exit', [string]$SegEnv['SEG_BACKHAUL_INTERFACE'], [string]$SegEnv['SEG_BACKHAUL_VPS1'], [string]$SegEnv['SEG_BACKHAUL_VPS2'])
+    }
+
+    $remote = Invoke-RemoteScript -IP $Node.IP -ScriptPath $CheckNodeFile -Arguments $arguments -AllowFailure -Quiet
+
+    if ($remote.Code -ne 0 -or $remote.Output -notmatch 'CHECK_NODE_DONE') {
+        throw "check-node.sh failed on $($Node.Name) (exit code $($remote.Code)): $((($remote.Output -split "`n") | Select-Object -Last 2) -join ' ')"
+    }
+
+    $parsed = ConvertFrom-CheckOutput -Text $remote.Output
+    $values = $parsed.Values
+
+    foreach ($name in @('OS', 'KERNEL', 'REBOOT_REQUIRED', 'PACKAGES', 'SERVICES', 'SECURITY')) {
+        if (-not $values.ContainsKey($name)) {
+            throw "check-node.sh on $($Node.Name) did not report $name."
         }
     }
 
-    return $info
+    Write-Log -Level 'INFO' -Message "Check: $($Node.Name) ($($Node.Role)) os=$($values['OS']) kernel=$($values['KERNEL']) reboot-required=$($values['REBOOT_REQUIRED'])"
+
+    if ($values['OS'] -ne 'ubuntu 24.04') {
+        Write-Log -Level 'WARN' -Message "$($Node.Name): Ubuntu 24.04 is required; found '$($values['OS'])'."
+    }
+
+    if ($values['REBOOT_REQUIRED'] -eq 'yes') {
+        Write-Log -Level 'WARN' -Message "$($Node.Name): a reboot is pending (offered by the next synchronization, after confirmation)."
+    }
+
+    $problems = @()
+    $changes = @()
+
+    foreach ($path in $Expected.Keys) {
+        $actual = if ($parsed.Files.ContainsKey($path)) { $parsed.Files[$path] } else { 'MISSING' }
+
+        if ($actual -ne $Expected[$path]) {
+            $changes += "$path $(if ($actual -eq 'MISSING') { 'is missing' } else { 'differs from the local source' })"
+        }
+    }
+
+    $nothingInstalled = ($values['PACKAGES'] -ne 'OK') -and (@($parsed.Files.Values | Where-Object { $_ -ne 'MISSING' }).Count -eq 0)
+
+    if ($values['PACKAGES'] -ne 'OK') { $problems += "packages: $($values['PACKAGES'])" }
+    if ($values['SERVICES'] -ne 'OK') { $problems += "services: $($values['SERVICES'])" }
+
+    foreach ($name in @('FAIL_CLOSED', 'EXIT_FIREWALL', 'BACKHAUL_IF')) {
+        if ($values.ContainsKey($name) -and $values[$name] -notin @('OK', 'UP')) { $problems += "$($name.ToLowerInvariant()): $($values[$name])" }
+    }
+
+    if ($values.ContainsKey('HANDSHAKE_EXIT') -and $values['HANDSHAKE_EXIT'] -notlike 'FRESH*') { $problems += "handshake (exit side): $($values['HANDSHAKE_EXIT'])" }
+
+    $state = if ($nothingInstalled) { 'NEW' } elseif ($problems.Count -gt 0) { 'DEGRADED' } elseif ($changes.Count -gt 0) { 'CHANGES' } else { 'READY' }
+
+    return [pscustomobject]@{
+        Node     = $Node
+        State    = $state
+        Problems = $problems
+        Changes  = $changes
+        Security = $values['SECURITY']
+        Values   = $values
+        Files    = $parsed.Files
+    }
+}
+
+function Get-SegBackhaulState {
+    # Read-only checks of the backhaul seen from the gateway (check-backhaul.sh; it only sends DNS queries).
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Node,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$HasSingBoxConfig
+    )
+
+    $arguments = @($backhaulInterface, [string]$SegEnv['SEG_BACKHAUL_VPS1'], [string]$SegEnv['SEG_BACKHAUL_VPS2'], [string]$Exit.IP, [string]$SegEnv['SEG_MARK'])
+
+    if ($HasSingBoxConfig) {
+        $arguments += '/etc/sing-box/config.json'
+    }
+
+    $remote = Invoke-RemoteScript -IP $Node.IP -ScriptPath $CheckBackhaulFile -Arguments $arguments -AllowFailure -Quiet
+
+    return (ConvertFrom-CheckOutput -Text $remote.Output).Values
 }
 
 # ============================================================
@@ -329,20 +518,98 @@ try {
             -Reason 'The pair is not processed: the other node is unreachable.'
     }
     elseif ($Check) {
-        # Only the base checks exist so far; the checks of the SEG stages come with items 13-26.
-        foreach ($node in $Nodes) {
-            $info = Get-SegNodeBaseInfo -IP $node.IP
-            Write-Log -Level 'INFO' -Message "Check: $($node.Name) ($($node.Role)) os=$($info['OS']) kernel=$($info['KERNEL']) reboot-required=$($info['REBOOT_REQUIRED'])"
+        # Read-only: candidates are rendered locally only to compare their hashes with the installed files;
+        # the node checks run through ssh without uploading anything.
+        $temp = Join-Path ([System.IO.Path]::GetTempPath()) ('seg-check-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $temp | Out-Null
+        New-SegCandidates -TempDirectory $temp
 
-            if ($info['OS'] -ne 'ubuntu 24.04') {
-                Write-Log -Level 'WARN' -Message "$($node.Name): Ubuntu 24.04 is required; found '$($info['OS'])'."
+        $expectedGateway = @{
+            '/etc/seg/seg-failclosed.nft'               = (Get-FileSha256Lf $failClosedFiles[0])
+            '/etc/systemd/system/seg-failclosed.service' = (Get-FileSha256Lf $failClosedFiles[1])
+            "/etc/amnezia/amneziawg/$backhaulInterface.conf" = (Get-FileSha256Lf $backhaulGatewayFile)
+            '/etc/sing-box/config.json'                 = (Get-FileSha256Lf $singBoxFiles[0])
+            '/etc/systemd/system/sing-box.service'      = (Get-FileSha256Lf $singBoxFiles[1])
+        }
+
+        $expectedExit = @{
+            '/etc/seg/seg-exit.nft'                              = (Get-FileSha256Lf $egressFiles[0])
+            '/etc/systemd/system/seg-exit-fw.service'            = (Get-FileSha256Lf $egressFiles[1])
+            '/etc/systemd/system/seg-exit-keepalive.service'     = (Get-FileSha256Lf $egressFiles[2])
+            '/etc/unbound/unbound.conf.d/seg.conf'              = (Get-FileSha256Lf $egressFiles[3])
+            "/etc/amnezia/amneziawg/$backhaulInterface.conf"     = (Get-FileSha256Lf $backhaulExitFile)
+        }
+
+        $gatewayCheck = Get-SegNodeCheck -Node $Gateway -Expected $expectedGateway
+        $exitCheck = Get-SegNodeCheck -Node $Exit -Expected $expectedExit
+
+        $backhaul = @{}
+
+        if ($gatewayCheck.State -ne 'NEW') {
+            $hasConfig = $gatewayCheck.Files.ContainsKey('/etc/sing-box/config.json') -and $gatewayCheck.Files['/etc/sing-box/config.json'] -ne 'MISSING'
+            $backhaul = Get-SegBackhaulState -Node $Gateway -HasSingBoxConfig $hasConfig
+        }
+
+        function Get-Value([hashtable]$Table, [string]$Name) {
+            if ($Table.ContainsKey($Name)) { return $Table[$Name] } else { return 'NOT_CHECKED' }
+        }
+
+        $backhaulUp = ((Get-Value $backhaul 'INTERFACE') -eq 'UP') -and ((Get-Value $backhaul 'BACKHAUL_ADDRESS') -eq 'OK') -and ((Get-Value $exitCheck.Values 'BACKHAUL_IF') -eq 'UP')
+
+        $report = [ordered]@{
+            GATEWAY          = $gatewayCheck.State
+            EXIT             = $exitCheck.State
+            BACKHAUL         = $(if ($backhaulUp) { 'UP' } else { 'DOWN' })
+            HANDSHAKE        = (Get-Value $backhaul 'HANDSHAKE')
+            SELECTED_ROUTING = (Get-Value $backhaul 'SELECTED_ROUTING')
+            BACKHAUL_DNS     = (Get-Value $backhaul 'BACKHAUL_DNS')
+            EGRESS_IP        = (Get-Value $backhaul 'EGRESS_IP')
+            FAIL_CLOSED      = (Get-Value $gatewayCheck.Values 'FAIL_CLOSED')
+            UNMATCHED_DIRECT = (Get-Value $backhaul 'UNMATCHED_DIRECT')
+            SEG_LIST_VERSION = [string]$SegList.Version
+            SEG_LIST_HASH    = $SegList.Sha256
+            SECURITY         = $(if ($gatewayCheck.Security -eq 'OK' -and $exitCheck.Security -eq 'OK') { 'OK' } else { "FAIL (gateway: $($gatewayCheck.Security); exit: $($exitCheck.Security))" })
+        }
+
+        # What a healthy pair looks like (roadmap, item 26); anything else is a problem of the pair.
+        $pairProblems = @()
+
+        if ($report['BACKHAUL'] -ne 'UP') { $pairProblems += 'the backhaul is down' }
+        if ($report['HANDSHAKE'] -notlike 'FRESH*') { $pairProblems += "handshake: $($report['HANDSHAKE'])" }
+        if ($report['SELECTED_ROUTING'] -ne 'OK') { $pairProblems += "selected routing: $($report['SELECTED_ROUTING'])" }
+        if ($report['BACKHAUL_DNS'] -ne 'OK') { $pairProblems += "backhaul DNS: $($report['BACKHAUL_DNS'])" }
+        if ($report['EGRESS_IP'] -ne [string]$Exit.IP) { $pairProblems += "external address through the backhaul is $($report['EGRESS_IP']), expected $($Exit.IP)" }
+
+        Write-Log -Level 'INFO' -Message 'SEG check report:'
+
+        foreach ($key in $report.Keys) {
+            $value = [string]$report[$key]
+            $level = if ($value -in @('READY', 'UP', 'OK') -or $value -like 'FRESH*' -or $key -in @('SEG_LIST_VERSION', 'SEG_LIST_HASH')) { 'OK' } elseif ($key -eq 'UNMATCHED_DIRECT') { 'INFO' } elseif ($key -eq 'EGRESS_IP' -and $value -eq [string]$Exit.IP) { 'OK' } else { 'WARN' }
+
+            Write-Log -Level $level -Message "$key=$value"
+        }
+
+        if ($report['UNMATCHED_DIRECT'] -match '^\d+$' -and [int]$report['UNMATCHED_DIRECT'] -gt 0) {
+            Write-Log -Level 'WARN' -Message "UNMATCHED_DIRECT=$($report['UNMATCHED_DIRECT']): clients send traffic outside seg-list to the gateway (an outdated profile, resources missing from seg-list, application DoH); a warning, not an error."
+        }
+
+        foreach ($checked in @($gatewayCheck, $exitCheck)) {
+            $parts = @()
+
+            if ($checked.State -ne 'READY') { $parts += "state $($checked.State)" }
+            $parts += $checked.Problems
+            $parts += $checked.Changes
+
+            if ($checked.Security -ne 'OK') { $parts += "security: $($checked.Security)" }
+
+            if ($checked.Node.Role -eq 'seg-gateway') { $parts += $pairProblems }
+
+            if ($parts.Count -eq 0) {
+                Add-NodeResult -Node $checked.Node -Status 'OK' -Message 'Configuration and state are current (check only).'
             }
-
-            if ($info['REBOOT_REQUIRED'] -eq 'yes') {
-                Write-Log -Level 'WARN' -Message "$($node.Name): a reboot is pending (applied by the next synchronization after confirmation)."
+            else {
+                Add-NodeResult -Node $checked.Node -Status 'CHANGES' -Message "Not current: $($parts -join '; ')."
             }
-
-            Add-NodeResult -Node $node -Status 'INCOMPLETE' -Message 'SSH works; the checks of the SEG configuration are not implemented yet (roadmap items 13-26).'
         }
     }
     else {
@@ -360,81 +627,7 @@ try {
         $applyCopy     = New-LinuxCopy -Source $ApplyFile -TempDirectory $temp
         $checkCopy     = New-LinuxCopy -Source $CheckBackhaulFile -TempDirectory $temp
 
-        # Step 6 (item 27): candidate configurations are rendered before any node is changed,
-        # so a template error stops the run early.
-        $templateValues = @{}
-
-        foreach ($key in $SegEnv.Keys) {
-            $templateValues[$key] = $SegEnv[$key]
-        }
-
-        $templateValues['VPS1_PUBLIC_IP'] = $Exit.IP
-        $templateValues['VPS2_PUBLIC_IP'] = $Gateway.IP
-        $templateValues['SEG_VLESS_PORT'] = [string]$Gateway.Port
-
-        $destination = [string]$SegEnv['SEG_REALITY_DEST']
-        $templateValues['SEG_REALITY_DEST_HOST'] = $destination.Substring(0, $destination.LastIndexOf(':'))
-        $templateValues['SEG_REALITY_DEST_PORT'] = $destination.Substring($destination.LastIndexOf(':') + 1)
-
-        $templateValues['SEG_VLESS_USERS_JSON'] = ConvertTo-SegVlessUsersJson -Clients $SegClients -Flow $SegEnv['SEG_REALITY_FLOW']
-        $templateValues['SEG_POLICY_RULES_JSON'] = Get-SegPolicyRulesJson -Policy $SegEnv['SEG_UNMATCHED_POLICY']
-
-        $fragments = Get-SegRuleSetFragments -SegList $SegList
-
-        foreach ($key in $fragments.Keys) {
-            $templateValues[$key] = $fragments[$key]
-        }
-
-        $failClosedFiles = @(
-            New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.nft.template') -Values $templateValues -Directory $temp
-            New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.service.template') -Values $templateValues -Directory $temp
-        )
-
-        $backhaulInterface = $SegEnv['SEG_BACKHAUL_INTERFACE']
-        $backhaulMtu       = $SegEnv['SEG_BACKHAUL_MTU']
-
-        # The staged name is <interface>.conf: apply-seg.sh backhaul reads it by the interface name.
-        $backhaulGatewayFile = New-RenderedFile `
-            -TemplatePath (Join-Path $TemplatesDir 'awg-backhaul-vps2.conf.template') `
-            -Values $templateValues `
-            -Directory $temp `
-            -Name "$backhaulInterface.conf"
-
-        # The exit candidates go to their own directory: the backhaul candidate has the same file name.
-        $exitDir = Join-Path $temp 'exit'
-        New-Item -ItemType Directory -Path $exitDir | Out-Null
-
-        $backhaulExitFile = New-RenderedFile `
-            -TemplatePath (Join-Path $TemplatesDir 'awg-backhaul-vps1.conf.template') `
-            -Values $templateValues `
-            -Directory $exitDir `
-            -Name "$backhaulInterface.conf"
-
-        $egressFiles = @(
-            foreach ($template in @('seg-exit.nft', 'seg-exit-fw.service', 'seg-exit-keepalive.service', 'unbound-seg.conf')) {
-                New-RenderedFile -TemplatePath (Join-Path $TemplatesDir "$template.template") -Values $templateValues -Directory $exitDir
-            }
-        )
-
-        # The server configuration must be valid JSON before it leaves the laptop; sing-box check itself runs
-        # on the gateway with the Linux binary (the Windows build rejects routing_mark).
-        $singBoxConfigFile = New-RenderedFile `
-            -TemplatePath (Join-Path $TemplatesDir 'sing-box-vps2.json.template') `
-            -Values $templateValues `
-            -Directory $temp `
-            -Name 'sing-box-config.json'
-
-        try {
-            [void]([System.IO.File]::ReadAllText($singBoxConfigFile) | ConvertFrom-Json)
-        }
-        catch {
-            throw "The rendered sing-box configuration is not valid JSON: $($_.Exception.Message)"
-        }
-
-        $singBoxFiles = @(
-            $singBoxConfigFile
-            New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'sing-box.service.template') -Values $templateValues -Directory $temp
-        )
+        New-SegCandidates -TempDirectory $temp
 
         $proceed = Invoke-PairStage -Title 'upgrade' -Action {
             param($node)
@@ -646,7 +839,7 @@ try {
 
         if ($proceed) {
             foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'All node stages completed (up to sing-box); the final -Check and the client commands are not implemented yet (roadmap items 21-26).'
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'All node stages completed (up to sing-box); the final -Check and the rollback of the pair are added by roadmap items 27 and 28.'
             }
         }
     }

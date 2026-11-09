@@ -1847,9 +1847,15 @@ foreach ($Server in $Targets) {
                 $checkProblems += "awg-iptables.service: $($checkStatus['FIREWALL'])"
             }
 
-            if (-not (Test-Secured -IP $Server.IP -Port ([string]$Server.Port))) {
+            $checkSecured = Test-Secured -IP $Server.IP -Port ([string]$Server.Port)
+
+            if (-not $checkSecured) {
                 $checkProblems += 'security hardening is incomplete'
             }
+
+            # Baseline of a healthy VPN server (roadmap, item 26): STATE=READY, VPN=UP, SECURITY=OK.
+            # READY means that awg0 and the firewall service are active, i.e. the VPN is up.
+            Write-Log -Level 'INFO' -Message "Check baseline: $($Server.Name) STATE=$checkState VPN=$(if ($checkState -eq 'READY') { 'UP' } else { 'NOT_READY' }) SECURITY=$(if ($checkSecured) { 'OK' } else { 'FAIL' })"
 
             if ($checkProblems.Count -eq 0) {
                 $ServerStatus = 'OK'
