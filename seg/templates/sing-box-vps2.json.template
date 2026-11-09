@@ -6,7 +6,7 @@
       { "type": "udp", "tag": "dns-seg", "server": "{{SEG_BACKHAUL_VPS1}}", "server_port": 53, "detour": "seg-out" }
     ],
     "rules": [
-      { "domain_suffix": [{{SEG_DOMAIN_SUFFIX_JSON}}], "action": "route", "server": "dns-seg" }
+      { "rule_set": [{{SEG_DOMAIN_RULE_SETS_JSON}}], "action": "route", "server": "dns-seg" }
     ],
     "final": "dns-local",
     "strategy": "ipv4_only"
@@ -44,10 +44,12 @@
     "rules": [
       { "action": "sniff" },
       { "ip_is_private": true, "action": "reject" },
-      { "domain_suffix": [{{SEG_DOMAIN_SUFFIX_JSON}}], "outbound": "seg-out" },
-      { "ip_cidr": [{{SEG_CIDR_JSON}}], "outbound": "seg-out" },
+      { "rule_set": [{{SEG_ROUTE_RULE_SETS_JSON}}], "outbound": "seg-out" },
       { "action": "resolve", "server": "dns-local" },
-      { "ip_is_private": true, "action": "reject" }
+      { "ip_is_private": true, "action": "reject" }{{SEG_POST_RESOLVE_RULES_JSON}}
+    ],
+    "rule_set": [
+      {{SEG_RULE_SETS_JSON}}
     ],
     "final": "direct",
     "default_domain_resolver": "dns-local"

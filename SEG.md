@@ -276,18 +276,38 @@ Backup/restore выполняется отдельно для параметро
 config/seg-list.json
 ```
 
-является единственным источником selective routing rules.
+является единственным источником selective routing rules. В файле нет секретов, он хранится в git.
 
-Содержит:
+Структура:
 
-```text
-version
-groups
-domains
-domain_suffixes
-cidrs
-sources
+```json
+{
+  "version": 1,
+  "groups": [
+    {
+      "name": "github",
+      "title": "GitHub",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": ["github.com"],
+      "cidrs": [],
+      "sources": ["https://api.github.com/meta, checked 2026-11-09"]
+    }
+  ]
+}
 ```
+
+- `version` — целое число не меньше 1; повышается вручную при изменении списка (для людей и отчётов; устаревание профилей определяет SHA-256, раздел 21);
+- `groups` — непустой массив групп; у группы `name` (строчный идентификатор, уникален), `title`, `enabled` (по умолчанию `true`) и четыре списка: `domains` (точное имя), `domain_suffixes` (имя и все поддомены), `cidrs` (IPv4 CIDR), `sources` (откуда взят список, текст);
+- отключённая группа (`enabled: false`) в правила не попадает;
+- неизвестные поля отвергаются, чтобы опечатки не пропускались.
+
+Проверки (`scripts\lib\seglist.ps1`, сообщает обо всех проблемах сразу):
+
+- имена в нижнем регистре, без точки в начале и подстановок (`*.`), не IP-адрес, длина до 253;
+- CIDR только IPv4 с префиксом от 8, адрес сети без «хвоста», не пересекается с частными и зарезервированными диапазонами (`10/8`, `172.16/12`, `192.168/16`, `127/8`, `169.254/16`, `100.64/10`, `198.18/15`, multicast): они блокируются на VPS1 и VPS2, а `198.18.0.0/15` занят FakeIP клиента;
+- у включённой группы есть хотя бы одна запись, а у включённых групп вместе — хотя бы один домен или суффикс (DNS-правила строятся по доменам);
+- одинаковые записи в разных группах объединяются (первое вхождение сохраняет порядок), внутри группы дубли запрещены.
 
 Первая версия содержит:
 
@@ -302,9 +322,11 @@ YouTube
 
 Состав группы YouTube подтверждён прототипом: `youtube.com`, `youtu.be`, `youtube-nocookie.com`, `ytimg.com`, `ggpht.com`, `googlevideo.com`, `youtubei.googleapis.com`, `jnn-pa.googleapis.com`. Без `googlevideo.com`, `ytimg.com`, `ggpht.com` и `jnn-pa.googleapis.com` видео не воспроизводится.
 
-Для файла вычисляется SHA-256.
+Состав групп получен так: GitHub и GitHub Copilot — из публичного `https://api.github.com/meta` (`domains.website`, `domains.packages`, `domains.copilot`) и документации GitHub; Telegram (IPv4 CIDR) — из `https://core.telegram.org/resources/cidr.txt`; YouTube и ChatGPT — по прототипу; Facebook / Messenger — начальный список, на прототипе не проверялся. Источник каждой группы записан в её `sources`. IPv6-диапазоны Telegram не включены (selected-трафик пока только IPv4, раздел 22).
 
-Из него генерируется sing-box `rule_set`.
+Для файла вычисляется SHA-256 по содержимому с нормализацией: удаляется BOM, переводы строк приводятся к LF, поэтому значение не зависит от того, как git выгрузил файл (CRLF или LF).
+
+Из файла генерируются два inline `rule_set` для `sing-box`: `seg-domains` (правила `domain` и `domain_suffix`, пустые не создаются) и `seg-cidrs` (правило `ip_cidr`, только если есть CIDR). Домены и IP-диапазоны разделены, потому что IP-правила не должны попадать в DNS-правила. Наборы подставляются в шаблоны клиента и VPS2 как JSON-фрагменты (`SEG_RULE_SETS_JSON`, `SEG_DOMAIN_RULE_SETS_JSON`, `SEG_ROUTE_RULE_SETS_JSON`, `SEG_POST_RESOLVE_RULES_JSON`).
 
 Правила используются:
 
@@ -487,13 +509,16 @@ VPS2_BACKHAUL_IP
 
 1. `sniff` (TLS SNI, QUIC);
 2. reject для private, loopback и link-local адресов (`ip_is_private`; сеть backhaul входит в private);
-3. `seg-list` (домен, sniffed-домен, CIDR) → selected outbound;
+3. набор правил `seg-domains` и `seg-cidrs` (домен, sniffed-домен, CIDR) → selected outbound;
 4. `resolve` локальным резолвером VPS2 и повторный reject private: домен, указывающий на локальный адрес, не должен пройти;
-5. `final` → direct (политика `direct`) или reject (политика `block`).
+5. набор `seg-cidrs` ещё раз, уже по разрешённому адресу: домен вне `seg-list`, резолвящийся в адрес из его CIDR (например, другой домен на IP Telegram), тоже идёт selected;
+6. `final` → direct (политика `direct`) или reject (политика `block`).
+
+`seg-list` на VPS2 и на клиенте задаётся двумя inline `rule_set`: `seg-domains` (домены и суффиксы) и `seg-cidrs` (IP-диапазоны, если они есть). IP-правила не входят в набор для DNS-правил: DNS-правило использует только `seg-domains`.
 
 Selected outbound использует `domain_resolver` на DNS VPS1 с `detour` через selected outbound. DNS-правило отправляет домены `seg-list` на resolver VPS1, остальные — на локальный.
 
-Проверено: домен из VLESS-запроса, sniffed-домен при IP-подключении с SNI из `seg-list` и CIDR дают выход через VPS1, остальной трафик выходит с IP VPS2.
+Проверено: домен из VLESS-запроса, sniffed-домен при IP-подключении с SNI из `seg-list` и CIDR дают выход через VPS1, остальной трафик выходит с IP VPS2. Конфигурация VPS2, сгенерированная из `seg-list.json` (шаблон и `rule_set`), проверена на VPS2: суффиксы YouTube, ChatGPT, GitHub, Facebook, Telegram выходят с IP VPS1; Telegram по IP (`149.154.167.99`) и домен вне списка, резолвящийся в этот диапазон (`149.154.167.99.nip.io`), идут через `seg-out`; адрес вне списка (`8.8.4.4`) идёт direct; при остановленном DNS VPS1 не резолвившиеся ранее selected-домены не открываются и не уходят с IP VPS2.
 
 ### Страховочный DIRECT
 
@@ -904,11 +929,12 @@ scripts\seg\*.ps1       SEG-логика (sync, клиенты, профили)
 scripts\lib\common.ps1  общие функции SEG-скриптов: журнал, подтверждения, awg, случайные значения, backup файлов env (SSH и upgrade-этап добавляются с sync-seg.ps1)
 scripts\lib\servers.ps1 загрузчик servers.txt (разбор, валидация, выбор по режиму, миграция); используется и VPN-, и SEG-скриптами
 scripts\lib\segenv.ps1  загрузчик и валидатор config/seg.env (SEG-скрипты)
+scripts\lib\seglist.ps1 загрузчик и валидатор config/seg-list.json, SHA-256, генерация rule_set (SEG-скрипты)
 seg\*.sh                bootstrap-seg.sh, secure-seg.sh
 seg\templates\*         шаблоны {{VAR}} конфигураций SEG (backhaul, nftables, unbound, sing-box, systemd)
 ```
 
-Шаблоны получены из прототипа (раздел 28): отрисованные с значениями прототипа, они совпадают с работающими конфигурациями на VPS1 и VPS2, клиентский профиль проходит `sing-box check`. Имена переменных — параметры `seg.env` (`SEG_*`) и адреса из `servers.txt` (`VPS1_PUBLIC_IP`, `VPS2_PUBLIC_IP`); списки `seg-list` и пользователей подставляются как JSON-фрагменты (`SEG_DOMAIN_SUFFIX_JSON`, `SEG_CIDR_JSON`, `SEG_VLESS_USERS_JSON`). Политика `SEG_UNMATCHED_POLICY = block` в серверный шаблон ещё не включена и не проверялась (пункт 20).
+Шаблоны получены из прототипа (раздел 28): отрисованные с значениями прототипа, они совпадают с работающими конфигурациями на VPS1 и VPS2 (конфигурации `sing-box` отличаются только тем, что `seg-list` задан через `rule_set`, см. раздел 12), клиентский профиль проходит `sing-box check`. Имена переменных — параметры `seg.env` (`SEG_*`) и адреса из `servers.txt` (`VPS1_PUBLIC_IP`, `VPS2_PUBLIC_IP`); `seg-list` подставляется JSON-фрагментами `rule_set` (раздел 7: `SEG_RULE_SETS_JSON`, `SEG_DOMAIN_RULE_SETS_JSON`, `SEG_ROUTE_RULE_SETS_JSON`, `SEG_POST_RESOLVE_RULES_JSON`), пользователи — `SEG_VLESS_USERS_JSON`. Политика `SEG_UNMATCHED_POLICY = block` в серверный шаблон ещё не включена и не проверялась (пункт 20).
 
 Конфигурации SEG формируются из шаблонов `{{VAR}}`, зафиксированных по результатам прототипа (roadmap, пункт 0). Порядок и принципы реализации описаны в `roadmap.md`.
 
