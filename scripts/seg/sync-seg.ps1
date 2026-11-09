@@ -489,6 +489,110 @@ function Get-SegBackhaulState {
     return (ConvertFrom-CheckOutput -Text $remote.Output).Values
 }
 
+function Get-ReportValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Table,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($Table.ContainsKey($Name)) { return $Table[$Name] } else { return 'NOT_CHECKED' }
+}
+
+function Invoke-SegCheckReport {
+    # The read-only check of the pair (item 26), used by -Check and as the final step of the apply order
+    # (item 27, step 17). Needs the candidates rendered by New-SegCandidates. Logs the report and returns
+    # one result per node (Node, Status OK or CHANGES, Message).
+    $expectedGateway = @{
+        '/etc/seg/seg-failclosed.nft'                    = (Get-FileSha256Lf $failClosedFiles[0])
+        '/etc/systemd/system/seg-failclosed.service'     = (Get-FileSha256Lf $failClosedFiles[1])
+        "/etc/amnezia/amneziawg/$backhaulInterface.conf" = (Get-FileSha256Lf $backhaulGatewayFile)
+        '/etc/sing-box/config.json'                      = (Get-FileSha256Lf $singBoxFiles[0])
+        '/etc/systemd/system/sing-box.service'           = (Get-FileSha256Lf $singBoxFiles[1])
+    }
+
+    $expectedExit = @{
+        '/etc/seg/seg-exit.nft'                          = (Get-FileSha256Lf $egressFiles[0])
+        '/etc/systemd/system/seg-exit-fw.service'        = (Get-FileSha256Lf $egressFiles[1])
+        '/etc/systemd/system/seg-exit-keepalive.service' = (Get-FileSha256Lf $egressFiles[2])
+        '/etc/unbound/unbound.conf.d/seg.conf'           = (Get-FileSha256Lf $egressFiles[3])
+        "/etc/amnezia/amneziawg/$backhaulInterface.conf" = (Get-FileSha256Lf $backhaulExitFile)
+    }
+
+    $gatewayCheck = Get-SegNodeCheck -Node $Gateway -Expected $expectedGateway
+    $exitCheck = Get-SegNodeCheck -Node $Exit -Expected $expectedExit
+
+    $backhaul = @{}
+
+    if ($gatewayCheck.State -ne 'NEW') {
+        $hasConfig = $gatewayCheck.Files.ContainsKey('/etc/sing-box/config.json') -and $gatewayCheck.Files['/etc/sing-box/config.json'] -ne 'MISSING'
+        $backhaul = Get-SegBackhaulState -Node $Gateway -HasSingBoxConfig $hasConfig
+    }
+
+    $backhaulUp = ((Get-ReportValue $backhaul 'INTERFACE') -eq 'UP') -and ((Get-ReportValue $backhaul 'BACKHAUL_ADDRESS') -eq 'OK') -and ((Get-ReportValue $exitCheck.Values 'BACKHAUL_IF') -eq 'UP')
+
+    $report = [ordered]@{
+        GATEWAY          = $gatewayCheck.State
+        EXIT             = $exitCheck.State
+        BACKHAUL         = $(if ($backhaulUp) { 'UP' } else { 'DOWN' })
+        HANDSHAKE        = (Get-ReportValue $backhaul 'HANDSHAKE')
+        SELECTED_ROUTING = (Get-ReportValue $backhaul 'SELECTED_ROUTING')
+        BACKHAUL_DNS     = (Get-ReportValue $backhaul 'BACKHAUL_DNS')
+        EGRESS_IP        = (Get-ReportValue $backhaul 'EGRESS_IP')
+        FAIL_CLOSED      = (Get-ReportValue $gatewayCheck.Values 'FAIL_CLOSED')
+        UNMATCHED_DIRECT = (Get-ReportValue $backhaul 'UNMATCHED_DIRECT')
+        SEG_LIST_VERSION = [string]$SegList.Version
+        SEG_LIST_HASH    = $SegList.Sha256
+        SECURITY         = $(if ($gatewayCheck.Security -eq 'OK' -and $exitCheck.Security -eq 'OK') { 'OK' } else { "FAIL (gateway: $($gatewayCheck.Security); exit: $($exitCheck.Security))" })
+    }
+
+    # What a healthy pair looks like (roadmap, item 26); anything else is a problem of the pair.
+    $pairProblems = @()
+
+    if ($report['BACKHAUL'] -ne 'UP') { $pairProblems += 'the backhaul is down' }
+    if ($report['HANDSHAKE'] -notlike 'FRESH*') { $pairProblems += "handshake: $($report['HANDSHAKE'])" }
+    if ($report['SELECTED_ROUTING'] -ne 'OK') { $pairProblems += "selected routing: $($report['SELECTED_ROUTING'])" }
+    if ($report['BACKHAUL_DNS'] -ne 'OK') { $pairProblems += "backhaul DNS: $($report['BACKHAUL_DNS'])" }
+    if ($report['EGRESS_IP'] -ne [string]$Exit.IP) { $pairProblems += "external address through the backhaul is $($report['EGRESS_IP']), expected $($Exit.IP)" }
+
+    Write-Log -Level 'INFO' -Message 'SEG check report:'
+
+    foreach ($key in $report.Keys) {
+        $value = [string]$report[$key]
+        $level = if ($value -in @('READY', 'UP', 'OK') -or $value -like 'FRESH*' -or $key -in @('SEG_LIST_VERSION', 'SEG_LIST_HASH')) { 'OK' } elseif ($key -eq 'UNMATCHED_DIRECT') { 'INFO' } elseif ($key -eq 'EGRESS_IP' -and $value -eq [string]$Exit.IP) { 'OK' } else { 'WARN' }
+
+        Write-Log -Level $level -Message "$key=$value"
+    }
+
+    if ($report['UNMATCHED_DIRECT'] -match '^\d+$' -and [int]$report['UNMATCHED_DIRECT'] -gt 0) {
+        Write-Log -Level 'WARN' -Message "UNMATCHED_DIRECT=$($report['UNMATCHED_DIRECT']): clients send traffic outside seg-list to the gateway (an outdated profile, resources missing from seg-list, application DoH); a warning, not an error."
+    }
+
+    $nodeResults = @()
+
+    foreach ($checked in @($gatewayCheck, $exitCheck)) {
+        $parts = @()
+
+        if ($checked.State -ne 'READY') { $parts += "state $($checked.State)" }
+        $parts += $checked.Problems
+        $parts += $checked.Changes
+
+        if ($checked.Security -ne 'OK') { $parts += "security: $($checked.Security)" }
+
+        if ($checked.Node.Role -eq 'seg-gateway') { $parts += $pairProblems }
+
+        $nodeResults += [pscustomobject]@{
+            Node    = $checked.Node
+            Status  = $(if ($parts.Count -eq 0) { 'OK' } else { 'CHANGES' })
+            Message = $(if ($parts.Count -eq 0) { 'Configuration and state are current.' } else { "Not current: $($parts -join '; ')." })
+        }
+    }
+
+    return $nodeResults
+}
+
 # ============================================================
 # Main
 # ============================================================
@@ -524,92 +628,9 @@ try {
         New-Item -ItemType Directory -Path $temp | Out-Null
         New-SegCandidates -TempDirectory $temp
 
-        $expectedGateway = @{
-            '/etc/seg/seg-failclosed.nft'               = (Get-FileSha256Lf $failClosedFiles[0])
-            '/etc/systemd/system/seg-failclosed.service' = (Get-FileSha256Lf $failClosedFiles[1])
-            "/etc/amnezia/amneziawg/$backhaulInterface.conf" = (Get-FileSha256Lf $backhaulGatewayFile)
-            '/etc/sing-box/config.json'                 = (Get-FileSha256Lf $singBoxFiles[0])
-            '/etc/systemd/system/sing-box.service'      = (Get-FileSha256Lf $singBoxFiles[1])
-        }
-
-        $expectedExit = @{
-            '/etc/seg/seg-exit.nft'                              = (Get-FileSha256Lf $egressFiles[0])
-            '/etc/systemd/system/seg-exit-fw.service'            = (Get-FileSha256Lf $egressFiles[1])
-            '/etc/systemd/system/seg-exit-keepalive.service'     = (Get-FileSha256Lf $egressFiles[2])
-            '/etc/unbound/unbound.conf.d/seg.conf'              = (Get-FileSha256Lf $egressFiles[3])
-            "/etc/amnezia/amneziawg/$backhaulInterface.conf"     = (Get-FileSha256Lf $backhaulExitFile)
-        }
-
-        $gatewayCheck = Get-SegNodeCheck -Node $Gateway -Expected $expectedGateway
-        $exitCheck = Get-SegNodeCheck -Node $Exit -Expected $expectedExit
-
-        $backhaul = @{}
-
-        if ($gatewayCheck.State -ne 'NEW') {
-            $hasConfig = $gatewayCheck.Files.ContainsKey('/etc/sing-box/config.json') -and $gatewayCheck.Files['/etc/sing-box/config.json'] -ne 'MISSING'
-            $backhaul = Get-SegBackhaulState -Node $Gateway -HasSingBoxConfig $hasConfig
-        }
-
-        function Get-Value([hashtable]$Table, [string]$Name) {
-            if ($Table.ContainsKey($Name)) { return $Table[$Name] } else { return 'NOT_CHECKED' }
-        }
-
-        $backhaulUp = ((Get-Value $backhaul 'INTERFACE') -eq 'UP') -and ((Get-Value $backhaul 'BACKHAUL_ADDRESS') -eq 'OK') -and ((Get-Value $exitCheck.Values 'BACKHAUL_IF') -eq 'UP')
-
-        $report = [ordered]@{
-            GATEWAY          = $gatewayCheck.State
-            EXIT             = $exitCheck.State
-            BACKHAUL         = $(if ($backhaulUp) { 'UP' } else { 'DOWN' })
-            HANDSHAKE        = (Get-Value $backhaul 'HANDSHAKE')
-            SELECTED_ROUTING = (Get-Value $backhaul 'SELECTED_ROUTING')
-            BACKHAUL_DNS     = (Get-Value $backhaul 'BACKHAUL_DNS')
-            EGRESS_IP        = (Get-Value $backhaul 'EGRESS_IP')
-            FAIL_CLOSED      = (Get-Value $gatewayCheck.Values 'FAIL_CLOSED')
-            UNMATCHED_DIRECT = (Get-Value $backhaul 'UNMATCHED_DIRECT')
-            SEG_LIST_VERSION = [string]$SegList.Version
-            SEG_LIST_HASH    = $SegList.Sha256
-            SECURITY         = $(if ($gatewayCheck.Security -eq 'OK' -and $exitCheck.Security -eq 'OK') { 'OK' } else { "FAIL (gateway: $($gatewayCheck.Security); exit: $($exitCheck.Security))" })
-        }
-
-        # What a healthy pair looks like (roadmap, item 26); anything else is a problem of the pair.
-        $pairProblems = @()
-
-        if ($report['BACKHAUL'] -ne 'UP') { $pairProblems += 'the backhaul is down' }
-        if ($report['HANDSHAKE'] -notlike 'FRESH*') { $pairProblems += "handshake: $($report['HANDSHAKE'])" }
-        if ($report['SELECTED_ROUTING'] -ne 'OK') { $pairProblems += "selected routing: $($report['SELECTED_ROUTING'])" }
-        if ($report['BACKHAUL_DNS'] -ne 'OK') { $pairProblems += "backhaul DNS: $($report['BACKHAUL_DNS'])" }
-        if ($report['EGRESS_IP'] -ne [string]$Exit.IP) { $pairProblems += "external address through the backhaul is $($report['EGRESS_IP']), expected $($Exit.IP)" }
-
-        Write-Log -Level 'INFO' -Message 'SEG check report:'
-
-        foreach ($key in $report.Keys) {
-            $value = [string]$report[$key]
-            $level = if ($value -in @('READY', 'UP', 'OK') -or $value -like 'FRESH*' -or $key -in @('SEG_LIST_VERSION', 'SEG_LIST_HASH')) { 'OK' } elseif ($key -eq 'UNMATCHED_DIRECT') { 'INFO' } elseif ($key -eq 'EGRESS_IP' -and $value -eq [string]$Exit.IP) { 'OK' } else { 'WARN' }
-
-            Write-Log -Level $level -Message "$key=$value"
-        }
-
-        if ($report['UNMATCHED_DIRECT'] -match '^\d+$' -and [int]$report['UNMATCHED_DIRECT'] -gt 0) {
-            Write-Log -Level 'WARN' -Message "UNMATCHED_DIRECT=$($report['UNMATCHED_DIRECT']): clients send traffic outside seg-list to the gateway (an outdated profile, resources missing from seg-list, application DoH); a warning, not an error."
-        }
-
-        foreach ($checked in @($gatewayCheck, $exitCheck)) {
-            $parts = @()
-
-            if ($checked.State -ne 'READY') { $parts += "state $($checked.State)" }
-            $parts += $checked.Problems
-            $parts += $checked.Changes
-
-            if ($checked.Security -ne 'OK') { $parts += "security: $($checked.Security)" }
-
-            if ($checked.Node.Role -eq 'seg-gateway') { $parts += $pairProblems }
-
-            if ($parts.Count -eq 0) {
-                Add-NodeResult -Node $checked.Node -Status 'OK' -Message 'Configuration and state are current (check only).'
-            }
-            else {
-                Add-NodeResult -Node $checked.Node -Status 'CHANGES' -Message "Not current: $($parts -join '; ')."
-            }
+        foreach ($checkResult in @(Invoke-SegCheckReport)) {
+            $message = if ($checkResult.Status -eq 'OK') { "$($checkResult.Message) (check only)" } else { $checkResult.Message }
+            Add-NodeResult -Node $checkResult.Node -Status $checkResult.Status -Message $message
         }
     }
     else {
@@ -837,9 +858,30 @@ try {
             }
         }
 
+        # ----------------------------------------------------
+        # Step 17 (item 27): the final check of the pair (the same read-only check as -Check)
+        # ----------------------------------------------------
+
         if ($proceed) {
-            foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'All node stages completed (up to sing-box); the final -Check and the rollback of the pair are added by roadmap items 27 and 28.'
+            Write-Log -Level 'START' -Message 'Stage: final check'
+
+            try {
+                foreach ($finalResult in @(Invoke-SegCheckReport)) {
+                    if ($finalResult.Status -eq 'OK') {
+                        Add-NodeResult -Node $finalResult.Node -Status 'OK' -Message 'Configured; the final check passed.'
+                    }
+                    else {
+                        Add-NodeResult -Node $finalResult.Node -Status 'ERROR' -Message "The final check found problems. $($finalResult.Message)"
+                    }
+                }
+            }
+            catch {
+                $description = Get-ErrorDescription -ErrorRecord $_
+                Write-Log -Level 'ERROR' -Message "The final check failed: $description"
+
+                foreach ($node in $Nodes) {
+                    Add-NodeResult -Node $node -Status 'ERROR' -Message "The final check could not be completed: $description"
+                }
             }
         }
     }
