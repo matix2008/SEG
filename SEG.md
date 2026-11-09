@@ -156,7 +156,7 @@ Name;IP;Port;Enabled
 
 `-Check` ничего не записывает: старый формат он читает в режиме совместимости (как `vpn-server` + `amnezia`) и сообщает «нужна миграция». Вывод `-Check` на старом и новом формате для режима VPN должен совпадать.
 
-Пустой `Port` допустим только для `seg-exit` и не участвует в проверке уникальности портов.
+Пустой `Port` допустим только для `seg-exit` (для него он обязан быть пустым) и не участвует в проверке уникальности. Уникальной должна быть пара `IP:Port` среди строк, у которых `Port` задан.
 
 ### Проверки валидатора
 
@@ -275,7 +275,10 @@ GitHub Copilot
 ChatGPT / OpenAI
 Facebook / Messenger
 Telegram
+YouTube
 ```
+
+Состав группы YouTube подтверждён прототипом: `youtube.com`, `youtu.be`, `youtube-nocookie.com`, `ytimg.com`, `ggpht.com`, `googlevideo.com`, `youtubei.googleapis.com`, `jnn-pa.googleapis.com`. Без `googlevideo.com`, `ytimg.com`, `ggpht.com` и `jnn-pa.googleapis.com` видео не воспроизводится.
 
 Для файла вычисляется SHA-256.
 
@@ -877,6 +880,7 @@ SECURITY
 ```text
 scripts\seg\*.ps1       SEG-логика (sync, клиенты, профили)
 scripts\lib\common.ps1  общие функции (SSH, лог, upgrade-этап)
+scripts\lib\servers.ps1 загрузчик servers.txt (разбор, валидация, выбор по режиму, миграция); используется и VPN-, и SEG-скриптами
 seg\*.sh                bootstrap-seg.sh, secure-seg.sh
 seg\templates\*         шаблоны {{VAR}} конфигураций SEG (backhaul, nftables, unbound, sing-box, systemd)
 ```

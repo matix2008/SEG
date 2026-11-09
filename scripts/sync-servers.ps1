@@ -52,6 +52,8 @@ if ($Mode -eq 'SEG') {
 
 $Root = Split-Path -Parent $PSScriptRoot
 
+. (Join-Path $PSScriptRoot 'lib\servers.ps1')
+
 # ============================================================
 # Logging
 # ============================================================
@@ -1701,50 +1703,24 @@ $Env = Read-EnvFile $EnvFile
 Test-Environment -Env $Env
 Write-Log -Level 'OK' -Message 'server.env validated. Secret values are not logged.'
 
-$Servers = @(
-    Import-Csv `
-        $ServersFile `
-        -Delimiter ';'
-)
+$ServersLoaded = Read-ServersFile -Path $ServersFile
+
+if ($ServersLoaded.Format -eq 'legacy') {
+    if ($Check) {
+        Write-Log -Level 'WARN' -Message 'servers.txt uses the legacy format (Name;IP;Port;Enabled): migration is required. Run sync-servers.ps1 -Mode VPN without -Check. It is read here as Role=vpn-server, Type=amnezia.'
+    }
+    else {
+        $migration = Convert-ServersFileToCurrent -Path $ServersFile
+        Write-Log -Level 'OK' -Message "servers.txt migrated to the current format (Name;IP;Port;Role;Type;Enabled): $($migration.Count) server(s) as vpn-server/amnezia. Backup: $($migration.Backup)"
+        $ServersLoaded = Read-ServersFile -Path $ServersFile
+    }
+}
+
+# This mode handles only Role = vpn-server; seg-gateway and seg-exit belong to -Mode SEG.
+$Servers = @(Select-ServersForMode -Servers @($ServersLoaded.Servers) -Mode VPN)
 
 if ($Servers.Count -eq 0) {
-    throw 'servers.txt contains no servers.'
-}
-
-foreach ($item in $Servers) {
-    if ([string]::IsNullOrWhiteSpace($item.Name)) {
-        throw 'servers.txt contains a server with an empty Name.'
-    }
-
-    if ([string]::IsNullOrWhiteSpace($item.IP)) {
-        throw "servers.txt contains an empty IP for server $($item.Name)."
-    }
-
-    if (
-        $item.Port -notmatch '^\d+$' -or
-        [int]$item.Port -lt 1 -or
-        [int]$item.Port -gt 65535
-    ) {
-        throw "Invalid UDP port for server $($item.Name): $($item.Port)"
-    }
-}
-
-$duplicateNames = @(
-    $Servers |
-    Group-Object Name |
-    Where-Object { $_.Count -gt 1 }
-)
-
-if ($duplicateNames.Count -gt 0) {
-    throw "Duplicate server Name values in servers.txt: $($duplicateNames.Name -join ', ')"
-}
-
-foreach ($item in $Servers) {
-    $enabledValue = ([string]$item.Enabled).Trim().ToLowerInvariant()
-
-    if ($enabledValue -notin @('true', 'false')) {
-        throw "Enabled must be true or false for server $($item.Name); found '$($item.Enabled)'"
-    }
+    throw 'servers.txt contains no servers with Role = vpn-server.'
 }
 
 Write-Log -Level 'OK' -Message "servers.txt loaded: $($Servers.Count) server(s)."

@@ -1,2 +1,2 @@
-Name;IP;Port;Enabled
-vps-example;203.0.113.10;42157;true
+Name;IP;Port;Role;Type;Enabled
+vps-example;203.0.113.10;42157;vpn-server;amnezia;true

@@ -52,6 +52,8 @@ if ($Mode -eq 'SEG') {
 
 $Root = Split-Path -Parent $PSScriptRoot
 
+. (Join-Path $PSScriptRoot 'lib\servers.ps1')
+
 # ============================================================
 # Logging
 # ============================================================
@@ -508,13 +510,15 @@ if ($Template -notmatch '(?m)^# PEERS\s*$') {
 # Select initial endpoint server for client config
 # ============================================================
 
+$ServersLoaded = Read-ServersFile -Path $ServersFile
+
+if ($ServersLoaded.Format -eq 'legacy') {
+    throw 'servers.txt uses the legacy format (Name;IP;Port;Enabled). Run sync-servers.ps1 -Mode VPN first: it migrates the file.'
+}
+
 $Servers = @(
-    Import-Csv `
-        $ServersFile `
-        -Delimiter ';' |
-    Where-Object {
-        (-not [string]::IsNullOrWhiteSpace([string]$_.Enabled)) -and ([string]$_.Enabled).Trim().ToLowerInvariant() -eq 'true'
-    }
+    Select-ServersForMode -Servers @($ServersLoaded.Servers) -Mode VPN |
+    Where-Object { $_.IsEnabled }
 )
 
 if ($Servers.Count -eq 0) {
