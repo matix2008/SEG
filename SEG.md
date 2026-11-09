@@ -959,7 +959,7 @@ scripts\lib\servers.ps1 загрузчик servers.txt (разбор, валид
 scripts\lib\segenv.ps1  загрузчик и валидатор config/seg.env (SEG-скрипты)
 scripts\lib\seglist.ps1 загрузчик и валидатор config/seg-list.json, SHA-256, генерация rule_set (SEG-скрипты)
 scripts\lib\segclients.ps1 хранение SEG-клиентов (clients\seg), пользователи VLESS для VPS2, метаданные профилей (SEG-скрипты)
-seg\*.sh                bootstrap-seg.sh, secure-seg.sh, apply-seg.sh (этапы настройки узлов с откатом: failclosed, routing, backhaul, egress, далее sing-box)
+seg\*.sh                bootstrap-seg.sh, secure-seg.sh, apply-seg.sh (этапы настройки узлов с откатом: failclosed, routing, backhaul, egress, далее sing-box), check-backhaul.sh (проверка backhaul, только чтение)
 seg\templates\*         шаблоны {{VAR}} конфигураций SEG (backhaul, nftables, unbound, sing-box, systemd)
 ```
 

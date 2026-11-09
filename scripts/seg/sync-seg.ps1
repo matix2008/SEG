@@ -52,6 +52,7 @@ $UpgradeFile  = Join-Path $Root 'upgrade.sh'
 $BootstrapFile = Join-Path $Root 'seg\bootstrap-seg.sh'
 $SecureFile   = Join-Path $Root 'seg\secure-seg.sh'
 $ApplyFile    = Join-Path $Root 'seg\apply-seg.sh'
+$CheckBackhaulFile = Join-Path $Root 'seg\check-backhaul.sh'
 $TemplatesDir = Join-Path $Root 'seg\templates'
 
 $RequiredTemplates = @(
@@ -72,7 +73,7 @@ $RequiredTemplates = @(
 # Step 1 (item 27): local configuration
 # ============================================================
 
-$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, $BootstrapFile, $SecureFile, $ApplyFile, (Join-Path $Root 'seg\sing-box.sha256')) +
+$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, $BootstrapFile, $SecureFile, $ApplyFile, $CheckBackhaulFile, (Join-Path $Root 'seg\sing-box.sha256')) +
     @($RequiredTemplates | ForEach-Object { Join-Path $TemplatesDir $_ })
 
 foreach ($file in $requiredFiles) {
@@ -301,6 +302,7 @@ try {
         $bootstrapCopy = New-LinuxCopy -Source $BootstrapFile -TempDirectory $temp
         $secureCopy    = New-LinuxCopy -Source $SecureFile -TempDirectory $temp
         $applyCopy     = New-LinuxCopy -Source $ApplyFile -TempDirectory $temp
+        $checkCopy     = New-LinuxCopy -Source $CheckBackhaulFile -TempDirectory $temp
 
         # Step 6 (item 27): candidate configurations are rendered before any node is changed,
         # so a template error stops the run early.
@@ -508,9 +510,30 @@ try {
             }
         }
 
+        # ----------------------------------------------------
+        # Steps 11-13 (item 27): backhaul checks before sing-box (check-backhaul.sh)
+        # ----------------------------------------------------
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'backhaul-check' -Role 'seg-gateway' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($checkCopy)
+
+                $arguments = "$backhaulInterface $($SegEnv['SEG_BACKHAUL_VPS1']) $($SegEnv['SEG_BACKHAUL_VPS2']) $($Exit.IP) $($SegEnv['SEG_MARK'])"
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/check-backhaul.sh`n/root/check-backhaul.sh $arguments" -AllowFailure
+
+                if ($result.Code -ne 0 -or $result.Output -notmatch 'BACKHAUL_CHECK_OK') {
+                    throw "The backhaul check failed on $($node.Name); sing-box is not started. See the log for the failed checks."
+                }
+
+                return $true
+            }
+        }
+
         if ($proceed) {
             foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed, routing, both backhaul sides and the exit egress completed; the remaining SEG stages are not implemented yet (roadmap items 18-20).'
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed, routing, both backhaul sides, the exit egress and the backhaul check completed; the remaining SEG stages are not implemented yet (roadmap items 19-20).'
             }
         }
     }
