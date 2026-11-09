@@ -1,5 +1,7 @@
 # Секреты: серверные и клиентские ключи, PSK
 config/server.env
+config/seg.env
+config/seg.env.*.bak
 config/awg0.conf.template
 clients/
 # Секреты и конфигурации ручного прототипа SEG (этап 0)

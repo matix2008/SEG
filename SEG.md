@@ -246,6 +246,18 @@ awg-backhaul
 
 Backup/restore выполняется отдельно для параметров VPN и SEG.
 
+Образец формата — `config/seg.env.example` (секреты пусты, параметры AmneziaWG — нули; рабочий файл создаёт `generate-server-env.ps1 -Mode SEG`). Формат строк `NAME=VALUE`, комментарии `#`; неизвестные и повторяющиеся параметры отвергаются (опечатки не пропускаются).
+
+Валидатор (`scripts\lib\segenv.ps1`) проверяет все параметры и сообщает обо всех проблемах сразу, не выводя значения секретов:
+
+- REALITY: ключи (43 символа base64url, не равны друг другу), `short_id` (2–16 hex-символов строчными, чётное число), `server_name`, `dest` (`host:port`), `flow`, `fingerprint`;
+- backhaul: ключи и PSK (44 символа base64, все различны), сеть `/30` (адрес сети, без пересечения с зарезервированными, например с сетью клиентов VPN), адреса VPS1 и VPS2 внутри сети и различны, порт, имя интерфейса (не `awg0`);
+- AmneziaWG: `Jc`, `Jmin ≤ Jmax`, `S1–S4` (15–150), `H1–H4` (уникальны), `RandomTrailers`, `MTU` не выше предела без фрагментации (раздел 13): `1500 − 28 − 32 − S4`, при `RandomTrailers = on` ещё минус 480 (при `S4 = 144`: 1296 и 816);
+- метки `SEG_MARK` и `SEG_UNMATCHED_MARK`: hex не меньше `0x1000`, различны, не равны `0xca6c` (fwmark AmneziaWG по умолчанию);
+- `SEG_UNMATCHED_POLICY`: `direct` или `block`.
+
+Параметры хранятся по ролям пары: `*_VPS1` — `seg-exit`, `*_VPS2` — `seg-gateway`. Порт VLESS в `seg.env` не хранится (это `Port` у `seg-gateway` в `servers.txt`), UUID клиентов — в `clients/seg/`.
+
 ## 7. `seg-list.json`
 
 Файл:
@@ -881,6 +893,7 @@ SECURITY
 scripts\seg\*.ps1       SEG-логика (sync, клиенты, профили)
 scripts\lib\common.ps1  общие функции (SSH, лог, upgrade-этап)
 scripts\lib\servers.ps1 загрузчик servers.txt (разбор, валидация, выбор по режиму, миграция); используется и VPN-, и SEG-скриптами
+scripts\lib\segenv.ps1  загрузчик и валидатор config/seg.env (SEG-скрипты)
 seg\*.sh                bootstrap-seg.sh, secure-seg.sh
 seg\templates\*         шаблоны {{VAR}} конфигураций SEG (backhaul, nftables, unbound, sing-box, systemd)
 ```

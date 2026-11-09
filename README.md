@@ -35,6 +35,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 ```text
 config/server.env          общие сети, DNS, серверные ключи и AWG-параметры
 config/server.env.*.bak    копии предыдущих server.env (последние 3, без шифрования)
+config/seg.env             параметры режима SEG: REALITY, backhaul, метки (создаётся generate-server-env.ps1 -Mode SEG)
+config/seg.env.*.bak       копии предыдущих seg.env (последние 3, без шифрования)
 config/awg0.conf.template  серверный шаблон и все peer
 clients/*.conf             один постоянный профиль на физическое устройство
 clients/generated/         производные профили для других VPS
@@ -69,6 +71,7 @@ vpn-01;203.0.113.10;42157;vpn-server;amnezia;true
 - `servers.txt.example` → скопировать в `servers.txt` и указать свои VPS.
 - `config/awg0.conf.template.example` → скопировать в `config/awg0.conf.template` (peer добавляет `add-client.ps1`).
 - `config/server.env.example` — только образец формата. Рабочий `config/server.env` создаёт `generate-server-env.ps1` (ключи и AWG-параметры в примере — нули и пустые значения, копировать его как есть нельзя).
+- `config/seg.env.example` — образец формата режима SEG (для справки; режим SEG пока не реализован, `-Mode SEG` завершается ошибкой). Рабочий `config/seg.env` будет создавать `generate-server-env.ps1 -Mode SEG`; в нём секреты (ключи REALITY и backhaul, PSK), поэтому он, как и `config/seg.env.*.bak`, в `.gitignore`. Режим VPN `seg.env` не читает.
 
 Порядок:
 

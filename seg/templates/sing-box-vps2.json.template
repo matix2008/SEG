@@ -23,7 +23,7 @@
         "server_name": "{{SEG_REALITY_SERVER_NAME}}",
         "reality": {
           "enabled": true,
-          "handshake": { "server": "{{SEG_REALITY_SERVER_NAME}}", "server_port": 443 },
+          "handshake": { "server": "{{SEG_REALITY_DEST_HOST}}", "server_port": {{SEG_REALITY_DEST_PORT}} },
           "private_key": "{{SEG_REALITY_PRIVATE_KEY}}",
           "short_id": ["{{SEG_REALITY_SHORT_ID}}"]
         }
