@@ -44,7 +44,7 @@ log START "Script started."
 
 [[ "${EUID}" -eq 0 ]] || die "apply-seg.sh must be run as root"
 
-USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 backhaul <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 egress <BACKHAUL_INTERFACE> <VPS1_BACKHAUL_IP> <VPS2_BACKHAUL_IP>"
+USAGE="Usage: $0 failclosed | $0 routing <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 backhaul <BACKHAUL_INTERFACE> <BACKHAUL_MTU> | $0 egress <BACKHAUL_INTERFACE> <VPS1_BACKHAUL_IP> <VPS2_BACKHAUL_IP> | $0 singbox <VLESS_PORT> <REALITY_SERVER_NAME>"
 
 [[ $# -ge 1 ]] || die "$USAGE"
 
@@ -629,6 +629,136 @@ stage_egress()
     log OK "Egress (firewall, NAT, DNS) installed and verified."
 }
 
+# ------------------------------------------------------------
+# Stage singbox (seg-gateway, items 19 and 20)
+# ------------------------------------------------------------
+# sing-box with VLESS/REALITY and the server-side routing. The configuration holds the REALITY private
+# key and the client UUIDs: root:sing-box 640, never printed. When the first installation fails sing-box
+# stays stopped (fail-closed is not touched); a failed update restores the previous configuration.
+
+SB_CONFIG_SRC="${STAGING_DIR}/sing-box-config.json"
+SB_UNIT_SRC="${STAGING_DIR}/sing-box.service"
+SB_CONFIG_DST="/etc/sing-box/config.json"
+SB_UNIT_DST="/etc/systemd/system/sing-box.service"
+SB_WAS_ACTIVE=0
+SB_WAS_ENABLED=0
+SB_WAS_INSTALLED=0
+
+singbox_state_ok()
+{
+    # singbox_state_ok <port> <server name>: prints the first mismatch.
+    local port="$1" server_name="$2"
+    local deadline=$(( SECONDS + 15 ))
+
+    systemctl is-enabled --quiet sing-box.service 2>/dev/null || { echo "sing-box.service is not enabled"; return 1; }
+    systemctl is-active --quiet sing-box.service || { echo "sing-box.service is not active"; return 1; }
+
+    until ss -H -lnt "sport = :${port}" | grep -q .; do
+        (( SECONDS < deadline )) || { echo "nothing listens on tcp ${port}"; return 1; }
+        sleep 1
+    done
+
+    [[ "$(ps -o user= -p "$(systemctl show -p MainPID --value sing-box.service)" | tr -d ' ')" == "sing-box" ]] || { echo "sing-box does not run as the user sing-box"; return 1; }
+
+    # An unauthenticated connection is passed by REALITY to the handshake server: the answer must be a real
+    # certificate for the configured server name.
+    echo | timeout 10 openssl s_client -connect "127.0.0.1:${port}" -servername "$server_name" 2>/dev/null |
+        grep -q 'BEGIN CERTIFICATE' || { echo "REALITY did not pass the unauthenticated handshake to ${server_name}"; return 1; }
+
+    return 0
+}
+
+rollback_singbox()
+{
+    if [[ "$SB_WAS_INSTALLED" == "0" ]]; then
+        # First installation: sing-box stays stopped and disabled. It is stopped while its unit file
+        # still exists; afterwards the candidate files are removed.
+        systemctl disable --now sing-box.service >/dev/null 2>&1 || true
+        restore_file "$SB_CONFIG_DST"
+        restore_file "$SB_UNIT_DST"
+        systemctl daemon-reload
+        systemctl reset-failed sing-box.service >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    restore_file "$SB_CONFIG_DST"
+    restore_file "$SB_UNIT_DST"
+    systemctl daemon-reload
+
+    chown root:sing-box "$SB_CONFIG_DST"
+    chmod 640 "$SB_CONFIG_DST"
+
+    if [[ "$SB_WAS_ACTIVE" == "1" ]]; then
+        systemctl restart sing-box.service || true
+    fi
+}
+
+stage_singbox()
+{
+    local port="$1" server_name="$2"
+
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )) || die "Invalid VLESS port: $port"
+    [[ "$server_name" =~ ^[A-Za-z0-9.-]{1,253}$ ]] || die "Invalid REALITY server name: $server_name"
+
+    [[ -f "$SB_CONFIG_SRC" ]] || die "$SB_CONFIG_SRC not found"
+    [[ -f "$SB_UNIT_SRC" ]] || die "$SB_UNIT_SRC not found"
+
+    # The candidate holds secrets: removed on any exit (see on_exit).
+    CLEANUP_FILES+=("$SB_CONFIG_SRC" "$SB_UNIT_SRC")
+
+    check_unresolved "$SB_CONFIG_SRC"
+    check_unresolved "$SB_UNIT_SRC"
+    log OK "No unresolved template variables found."
+
+    [[ -x /usr/local/bin/sing-box ]] || die "/usr/local/bin/sing-box is missing (bootstrap-seg.sh installs it)"
+    id sing-box >/dev/null 2>&1 || die "The user sing-box is missing (bootstrap-seg.sh creates it)"
+
+    # sing-box is never started without fail-closed.
+    systemctl is-active --quiet seg-failclosed.service || die "seg-failclosed.service is not active"
+    nft list table inet seg_failclosed >/dev/null || die "Table seg_failclosed is missing"
+
+    # The check runs with the Linux binary: routing_mark is accepted only there.
+    /usr/local/bin/sing-box check -c "$SB_CONFIG_SRC" || die "sing-box check rejected the candidate"
+    log OK "sing-box configuration candidate validated (sing-box check)."
+
+    systemctl is-active --quiet sing-box.service && SB_WAS_ACTIVE=1 || true
+    systemctl is-enabled --quiet sing-box.service 2>/dev/null && SB_WAS_ENABLED=1 || true
+    [[ -f "$SB_CONFIG_DST" && -f "$SB_UNIT_DST" ]] && SB_WAS_INSTALLED=1 || true
+
+    if same_file "$SB_CONFIG_SRC" "$SB_CONFIG_DST" &&
+       same_file "$SB_UNIT_SRC" "$SB_UNIT_DST" &&
+       [[ "$SB_WAS_ACTIVE" == "1" && "$SB_WAS_ENABLED" == "1" ]] &&
+       singbox_state_ok "$port" "$server_name" >/dev/null; then
+        log OK "sing-box is already current."
+        return 0
+    fi
+
+    backup_file "$SB_CONFIG_DST"
+    backup_file "$SB_UNIT_DST"
+    ROLLBACK_ACTION=rollback_singbox
+
+    install -d -o root -g sing-box -m 750 /etc/sing-box
+    install -o root -g sing-box -m 640 "$SB_CONFIG_SRC" "$SB_CONFIG_DST"
+    install -o root -g root -m 644 "$SB_UNIT_SRC" "$SB_UNIT_DST"
+    systemctl daemon-reload
+    systemctl enable sing-box.service >/dev/null
+
+    # sing-box applies a configuration only at start: a changed one needs a restart (connections reconnect).
+    if [[ "$SB_WAS_ACTIVE" == "1" ]]; then
+        log INFO "Restarting sing-box."
+        systemctl restart sing-box.service
+    else
+        systemctl start sing-box.service
+    fi
+
+    local problem
+    problem="$(singbox_state_ok "$port" "$server_name" || true)"
+    [[ -z "$problem" ]] || die "sing-box check failed: $problem"
+
+    ROLLBACK_ACTION=""
+    log OK "sing-box installed and verified."
+}
+
 case "$STAGE" in
     failclosed)
         [[ $# -eq 1 ]] || die "$USAGE"
@@ -645,6 +775,10 @@ case "$STAGE" in
     egress)
         [[ $# -eq 4 ]] || die "$USAGE"
         stage_egress "$2" "$3" "$4"
+        ;;
+    singbox)
+        [[ $# -eq 3 ]] || die "$USAGE"
+        stage_singbox "$2" "$3"
         ;;
     *)
         die "Unknown stage: $STAGE. $USAGE"

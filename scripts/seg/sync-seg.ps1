@@ -23,6 +23,7 @@ $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot '..\lib\servers.ps1')
 . (Join-Path $PSScriptRoot '..\lib\segenv.ps1')
 . (Join-Path $PSScriptRoot '..\lib\seglist.ps1')
+. (Join-Path $PSScriptRoot '..\lib\segclients.ps1')
 
 Initialize-Logging -Root $Root -ScriptName (Split-Path -Leaf $PSCommandPath)
 
@@ -95,6 +96,14 @@ $SingBoxVersion = $script:SegSingBoxVersion
 $SingBoxPackage = Get-VerifiedSingBoxLinuxPackage -Root $Root -Version $SingBoxVersion
 $SingBoxPackageSha256 = (Read-HashFile -Path (Join-Path $Root 'seg\sing-box.sha256'))[(Split-Path -Leaf $SingBoxPackage)]
 Write-Log -Level 'OK' -Message "sing-box $SingBoxVersion Linux package verified: $(Split-Path -Leaf $SingBoxPackage)"
+
+$SegClients = @(Read-SegClients -Root $Root)
+$EnabledClients = @($SegClients | Where-Object { $_.Enabled })
+Write-Log -Level 'OK' -Message "SEG clients: $($SegClients.Count) ($($EnabledClients.Count) enabled)."
+
+if ($EnabledClients.Count -eq 0) {
+    Write-Log -Level 'WARN' -Message 'There are no enabled SEG clients: sing-box starts, but nobody can connect.'
+}
 
 $ServersLoaded = Read-ServersFile -Path $ServersFile
 
@@ -212,6 +221,32 @@ function Invoke-PairStage {
     return $true
 }
 
+function Invoke-BackhaulCheck {
+    # Runs check-backhaul.sh on the gateway; throws when any check fails (sing-box is then not started or
+    # not considered healthy). With SingBoxConfig the selected outbound of that configuration is checked too.
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Node,
+
+        [Parameter(Mandatory = $false)]
+        [string]$SingBoxConfig
+    )
+
+    Copy-ToServer -IP $Node.IP -Files @($checkCopy)
+
+    $arguments = "$backhaulInterface $($SegEnv['SEG_BACKHAUL_VPS1']) $($SegEnv['SEG_BACKHAUL_VPS2']) $($Exit.IP) $($SegEnv['SEG_MARK'])"
+
+    if ($SingBoxConfig) {
+        $arguments += " $SingBoxConfig"
+    }
+
+    $result = Invoke-Remote -IP $Node.IP -Command "chmod +x /root/check-backhaul.sh`n/root/check-backhaul.sh $arguments" -AllowFailure
+
+    if ($result.Code -ne 0 -or $result.Output -notmatch 'BACKHAUL_CHECK_OK') {
+        throw "The backhaul check failed on $($Node.Name). See the log for the failed checks."
+    }
+}
+
 function Get-SegNodeBaseInfo {
     # Read-only: OS, running kernel and the pending-reboot flag.
     param(
@@ -314,6 +349,19 @@ try {
 
         $templateValues['VPS1_PUBLIC_IP'] = $Exit.IP
         $templateValues['VPS2_PUBLIC_IP'] = $Gateway.IP
+        $templateValues['SEG_VLESS_PORT'] = [string]$Gateway.Port
+
+        $destination = [string]$SegEnv['SEG_REALITY_DEST']
+        $templateValues['SEG_REALITY_DEST_HOST'] = $destination.Substring(0, $destination.LastIndexOf(':'))
+        $templateValues['SEG_REALITY_DEST_PORT'] = $destination.Substring($destination.LastIndexOf(':') + 1)
+
+        $templateValues['SEG_VLESS_USERS_JSON'] = ConvertTo-SegVlessUsersJson -Clients $SegClients -Flow $SegEnv['SEG_REALITY_FLOW']
+
+        $fragments = Get-SegRuleSetFragments -SegList $SegList
+
+        foreach ($key in $fragments.Keys) {
+            $templateValues[$key] = $fragments[$key]
+        }
 
         $failClosedFiles = @(
             New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.nft.template') -Values $templateValues -Directory $temp
@@ -344,6 +392,26 @@ try {
             foreach ($template in @('seg-exit.nft', 'seg-exit-fw.service', 'seg-exit-keepalive.service', 'unbound-seg.conf')) {
                 New-RenderedFile -TemplatePath (Join-Path $TemplatesDir "$template.template") -Values $templateValues -Directory $exitDir
             }
+        )
+
+        # The server configuration must be valid JSON before it leaves the laptop; sing-box check itself runs
+        # on the gateway with the Linux binary (the Windows build rejects routing_mark).
+        $singBoxConfigFile = New-RenderedFile `
+            -TemplatePath (Join-Path $TemplatesDir 'sing-box-vps2.json.template') `
+            -Values $templateValues `
+            -Directory $temp `
+            -Name 'sing-box-config.json'
+
+        try {
+            [void]([System.IO.File]::ReadAllText($singBoxConfigFile) | ConvertFrom-Json)
+        }
+        catch {
+            throw "The rendered sing-box configuration is not valid JSON: $($_.Exception.Message)"
+        }
+
+        $singBoxFiles = @(
+            $singBoxConfigFile
+            New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'sing-box.service.template') -Values $templateValues -Directory $temp
         )
 
         $proceed = Invoke-PairStage -Title 'upgrade' -Action {
@@ -518,22 +586,45 @@ try {
             $proceed = Invoke-PairStage -Title 'backhaul-check' -Role 'seg-gateway' -Action {
                 param($node)
 
-                Copy-ToServer -IP $node.IP -Files @($checkCopy)
+                Invoke-BackhaulCheck -Node $node
+                return $true
+            }
+        }
 
-                $arguments = "$backhaulInterface $($SegEnv['SEG_BACKHAUL_VPS1']) $($SegEnv['SEG_BACKHAUL_VPS2']) $($Exit.IP) $($SegEnv['SEG_MARK'])"
-                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/check-backhaul.sh`n/root/check-backhaul.sh $arguments" -AllowFailure
+        # ----------------------------------------------------
+        # Steps 14-16 (item 27): sing-box with VLESS/REALITY and server-side routing (apply-seg.sh singbox)
+        # ----------------------------------------------------
 
-                if ($result.Code -ne 0 -or $result.Output -notmatch 'BACKHAUL_CHECK_OK') {
-                    throw "The backhaul check failed on $($node.Name); sing-box is not started. See the log for the failed checks."
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'sing-box' -Role 'seg-gateway' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files $singBoxFiles -Destination '/root/.seg-sync/'
+
+                $arguments = "singbox $($Gateway.Port) $($SegEnv['SEG_REALITY_SERVER_NAME'])"
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh $arguments"
+
+                if ($result.Output -notmatch 'APPLY_SEG_OK stage=singbox') {
+                    throw "apply-seg.sh did not report APPLY_SEG_OK for sing-box on $($node.Name)"
                 }
 
                 return $true
             }
         }
 
+        # The installed configuration is checked once more: the selected outbound must be bound to the backhaul.
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'sing-box-check' -Role 'seg-gateway' -Action {
+                param($node)
+
+                Invoke-BackhaulCheck -Node $node -SingBoxConfig '/etc/sing-box/config.json'
+                return $true
+            }
+        }
+
         if ($proceed) {
             foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening, fail-closed, routing, both backhaul sides, the exit egress and the backhaul check completed; the remaining SEG stages are not implemented yet (roadmap items 19-20).'
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'All node stages completed (up to sing-box); the final -Check and the client commands are not implemented yet (roadmap items 21-26).'
             }
         }
     }
