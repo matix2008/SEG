@@ -775,6 +775,62 @@ function Copy-ToServer {
     Write-Log -Level 'OK' -Message "Files copied successfully to ${IP}:$Destination"
 }
 
+function Convert-Template {
+    # Replaces {{NAME}} with the values and fails on any variable left unresolved.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Template,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Values
+    )
+
+    $result = $Template
+
+    foreach ($key in $Values.Keys) {
+        $result = $result.Replace("{{$key}}", [string]$Values[$key])
+    }
+
+    $unresolved = @(
+        [regex]::Matches($result, '\{\{[^}]+\}\}') |
+        ForEach-Object { $_.Value } |
+        Sort-Object -Unique
+    )
+
+    if ($unresolved.Count -gt 0) {
+        throw "Unresolved template variables: $($unresolved -join ', ')"
+    }
+
+    return $result
+}
+
+function New-RenderedFile {
+    # Renders a template of seg\templates into the directory (LF line endings, name without .template).
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TemplatePath,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Values,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Directory
+    )
+
+    $name = [System.IO.Path]::GetFileName($TemplatePath) -replace '\.template$', ''
+    $path = Join-Path $Directory $name
+
+    try {
+        Write-Utf8Lf -Path $path -Text (Convert-Template -Template (Get-Content -LiteralPath $TemplatePath -Raw) -Values $Values)
+    }
+    catch {
+        throw "$name`: $($_.Exception.Message)"
+    }
+
+    Write-Log -Level 'OK' -Message "Rendered candidate $name"
+    return $path
+}
+
 function New-LinuxCopy {
     # Writes an LF-only copy of a script or template into the temporary directory.
     param(

@@ -51,6 +51,7 @@ $SegListFile  = Join-Path $Root 'config\seg-list.json'
 $UpgradeFile  = Join-Path $Root 'upgrade.sh'
 $BootstrapFile = Join-Path $Root 'seg\bootstrap-seg.sh'
 $SecureFile   = Join-Path $Root 'seg\secure-seg.sh'
+$ApplyFile    = Join-Path $Root 'seg\apply-seg.sh'
 $TemplatesDir = Join-Path $Root 'seg\templates'
 
 $RequiredTemplates = @(
@@ -71,7 +72,7 @@ $RequiredTemplates = @(
 # Step 1 (item 27): local configuration
 # ============================================================
 
-$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, $BootstrapFile, $SecureFile, (Join-Path $Root 'seg\sing-box.sha256')) +
+$requiredFiles = @($ServersFile, $SegEnvFile, $SegListFile, $UpgradeFile, $BootstrapFile, $SecureFile, $ApplyFile, (Join-Path $Root 'seg\sing-box.sha256')) +
     @($RequiredTemplates | ForEach-Object { Join-Path $TemplatesDir $_ })
 
 foreach ($file in $requiredFiles) {
@@ -162,20 +163,23 @@ function Skip-RemainingNodes {
 }
 
 function Invoke-PairStage {
-    # Runs one stage on both nodes (gateway first). Action receives the node and returns $false when the
-    # user declined to continue. The first failure or refusal stops the run: the nodes get results and
-    # the function returns $false.
+    # Runs one stage on the nodes (gateway first; -Role limits it to one role). Action receives the node and
+    # returns $false when the user declined to continue. The first failure or refusal stops the run: the
+    # nodes get results and the function returns $false.
     param(
         [Parameter(Mandatory = $true)]
         [string]$Title,
 
         [Parameter(Mandatory = $true)]
-        [scriptblock]$Action
+        [scriptblock]$Action,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Role
     )
 
     Write-Log -Level 'START' -Message "Stage: $Title"
 
-    foreach ($node in $Nodes) {
+    foreach ($node in @($Nodes | Where-Object { -not $Role -or $_.Role -eq $Role })) {
         $failure = $null
         $stopped = $false
 
@@ -203,7 +207,7 @@ function Invoke-PairStage {
         }
     }
 
-    Write-Log -Level 'OK' -Message "Stage completed on both nodes: $Title"
+    Write-Log -Level 'OK' -Message "Stage completed: $Title"
     return $true
 }
 
@@ -296,6 +300,23 @@ try {
         $upgradeCopy   = New-LinuxCopy -Source $UpgradeFile -TempDirectory $temp
         $bootstrapCopy = New-LinuxCopy -Source $BootstrapFile -TempDirectory $temp
         $secureCopy    = New-LinuxCopy -Source $SecureFile -TempDirectory $temp
+        $applyCopy     = New-LinuxCopy -Source $ApplyFile -TempDirectory $temp
+
+        # Step 6 (item 27): candidate configurations are rendered before any node is changed,
+        # so a template error stops the run early.
+        $templateValues = @{}
+
+        foreach ($key in $SegEnv.Keys) {
+            $templateValues[$key] = $SegEnv[$key]
+        }
+
+        $templateValues['VPS1_PUBLIC_IP'] = $Exit.IP
+        $templateValues['VPS2_PUBLIC_IP'] = $Gateway.IP
+
+        $failClosedFiles = @(
+            New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.nft.template') -Values $templateValues -Directory $temp
+            New-RenderedFile -TemplatePath (Join-Path $TemplatesDir 'seg-failclosed.service.template') -Values $templateValues -Directory $temp
+        )
 
         $proceed = Invoke-PairStage -Title 'upgrade' -Action {
             param($node)
@@ -361,9 +382,31 @@ try {
             }
         }
 
+        # ----------------------------------------------------
+        # Step 7 (item 27): fail-closed on the gateway (apply-seg.sh failclosed)
+        # ----------------------------------------------------
+
+        if ($proceed) {
+            $proceed = Invoke-PairStage -Title 'fail-closed' -Role 'seg-gateway' -Action {
+                param($node)
+
+                Copy-ToServer -IP $node.IP -Files @($applyCopy)
+                Invoke-Remote -IP $node.IP -Command 'install -d -o root -g root -m 700 /root/.seg-sync' -Quiet | Out-Null
+                Copy-ToServer -IP $node.IP -Files $failClosedFiles -Destination '/root/.seg-sync/'
+
+                $result = Invoke-Remote -IP $node.IP -Command "chmod +x /root/apply-seg.sh`n/root/apply-seg.sh failclosed"
+
+                if ($result.Output -notmatch 'APPLY_SEG_OK stage=failclosed') {
+                    throw "apply-seg.sh did not report APPLY_SEG_OK for fail-closed on $($node.Name)"
+                }
+
+                return $true
+            }
+        }
+
         if ($proceed) {
             foreach ($node in $Nodes) {
-                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap and hardening completed; the remaining SEG stages are not implemented yet (roadmap items 14-20).'
+                Add-NodeResult -Node $node -Status 'PENDING' -Message 'Upgrade, bootstrap, hardening and fail-closed completed; the remaining SEG stages are not implemented yet (roadmap items 15-20).'
             }
         }
     }
