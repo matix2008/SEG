@@ -842,7 +842,11 @@ stage_snapshot()
 
     # The directory is 700 root: the copies keep the mode and the owner of the originals (cp -a), which the
     # restore needs (for example the sing-box user reads its configuration through the group).
-    log OK "Snapshot of $(grep -c '^present ' "$SNAP_DIR/manifest") file(s) and $(grep -c '^unit ' "$SNAP_DIR/manifest") unit state(s) taken."
+    # grep -c exits with 1 when nothing matches (a clean node has no present files): that is not an error.
+    local present_count unit_count
+    present_count="$(grep -c '^present ' "$SNAP_DIR/manifest" || true)"
+    unit_count="$(grep -c '^unit ' "$SNAP_DIR/manifest" || true)"
+    log OK "Snapshot of ${present_count} file(s) and ${unit_count} unit state(s) taken."
 }
 
 snap_present()
