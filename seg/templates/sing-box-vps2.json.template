@@ -44,9 +44,11 @@
     "rules": [
       { "action": "sniff" },
       { "ip_is_private": true, "action": "reject" },
+      { "ip_cidr": ["{{VPS2_PUBLIC_IP}}/32"], "action": "reject" },
       { "rule_set": [{{SEG_ROUTE_RULE_SETS_JSON}}], "outbound": "seg-out" },
       { "action": "resolve", "server": "dns-local" },
-      { "ip_is_private": true, "action": "reject" }{{SEG_POST_RESOLVE_RULES_JSON}}{{SEG_POLICY_RULES_JSON}}
+      { "ip_is_private": true, "action": "reject" },
+      { "ip_cidr": ["{{VPS2_PUBLIC_IP}}/32"], "action": "reject" }{{SEG_POST_RESOLVE_RULES_JSON}}{{SEG_POLICY_RULES_JSON}}
     ],
     "rule_set": [
       {{SEG_RULE_SETS_JSON}}

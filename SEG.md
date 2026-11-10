@@ -533,7 +533,7 @@ VPS2_BACKHAUL_IP
 Подтверждено прототипом:
 
 1. `sniff` (TLS SNI, QUIC);
-2. reject для private, loopback и link-local адресов (`ip_is_private`; сеть backhaul входит в private);
+2. reject для private, loopback и link-local адресов (`ip_is_private`; сеть backhaul входит в private) и для собственного публичного IP VPS2 (`VPS2_PUBLIC_IP/32`, до и после `resolve`): соединение клиента со своим публичным адресом VPS2 доставляется локально через loopback, где UFW не фильтрует, и открыло бы порты, закрытые снаружи (например, агент мониторинга из образа на `0.0.0.0:10050`);
 3. набор правил `seg-domains` и `seg-cidrs` (домен, sniffed-домен, CIDR) → selected outbound;
 4. `resolve` локальным резолвером VPS2 и повторный reject private: домен, указывающий на локальный адрес, не должен пройти;
 5. набор `seg-cidrs` ещё раз, уже по разрешённому адресу: домен вне `seg-list`, резолвящийся в адрес из его CIDR (например, другой домен на IP Telegram), тоже идёт selected;
