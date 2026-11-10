@@ -246,6 +246,22 @@ else
         route allow in on "$BACKHAUL_INTERFACE" out on "$EXTERNAL_INTERFACE" from "$VPS2_BACKHAUL_IP"
 fi
 
+# A fail-closed table that is already missing (removed by hand or lost) is not caused by the UFW reload below and
+# must not block this stage: the later fail-closed stage of the same run restores it, -Check reports it.
+FAILCLOSED_BEFORE=0
+if [[ "$ROLE" == "seg-gateway" ]] && nft list table inet seg_failclosed >/dev/null 2>&1; then
+    FAILCLOSED_BEFORE=1
+fi
+
+# Same for the services of the role: a service that was already stopped before this run (by hand, after a failure)
+# is not caused by the UFW reload and must not block the run; the later stages start it again, -Check reports it.
+declare -A ACTIVE_BEFORE=()
+for unit in seg-failclosed.service seg-exit-fw.service seg-exit-keepalive.service "awg-quick@${BACKHAUL_INTERFACE}.service"; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        ACTIVE_BEFORE["$unit"]=1
+    fi
+done
+
 ufw --force enable
 ufw reload
 remove_stale_rules
@@ -284,7 +300,15 @@ require_active_if_enabled()
 
     for unit in "$@"; do
         if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
-            systemctl is-active --quiet "$unit" || die "$unit is enabled but not active"
+            if systemctl is-active --quiet "$unit"; then
+                continue
+            fi
+
+            if [[ -n "${ACTIVE_BEFORE[$unit]:-}" ]]; then
+                die "$unit is enabled but not active"
+            fi
+
+            log WARN "$unit was already inactive before this run; a later stage starts it again."
         fi
     done
 }
@@ -296,7 +320,11 @@ if [[ "$ROLE" == "seg-gateway" ]]; then
 
     # UFW reload must not remove the fail-closed table: it is a separate nftables table.
     if systemctl is-active --quiet seg-failclosed.service; then
-        nft list table inet seg_failclosed >/dev/null || die "Table seg_failclosed is missing after the UFW reload"
+        if [[ "$FAILCLOSED_BEFORE" == "1" ]]; then
+            nft list table inet seg_failclosed >/dev/null || die "Table seg_failclosed is missing after the UFW reload"
+        elif ! nft list table inet seg_failclosed >/dev/null 2>&1; then
+            log WARN "Table seg_failclosed was already missing before this run; the fail-closed stage restores it."
+        fi
     fi
 else
     require_active_if_enabled seg-exit-fw.service "awg-quick@${BACKHAUL_INTERFACE}.service" seg-exit-keepalive.service
