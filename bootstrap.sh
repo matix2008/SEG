@@ -32,6 +32,27 @@ on_error()
 
 trap 'on_error "$LINENO" "$BASH_COMMAND"' ERR
 
+# Launchpad sometimes answers with a temporary error (HTTP 500); only this command is retried.
+add_amnezia_ppa()
+{
+    local attempt
+    local max_attempts=3
+    local delay=25
+
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        if add-apt-repository -y ppa:amnezia/ppa; then
+            return 0
+        fi
+
+        if ((attempt < max_attempts)); then
+            log WARN "add-apt-repository failed (attempt ${attempt}/${max_attempts}); retrying in ${delay} s."
+            sleep "$delay"
+        fi
+    done
+
+    die "add-apt-repository ppa:amnezia/ppa failed after ${max_attempts} attempts (Launchpad may be temporarily unavailable): run sync again later"
+}
+
 log START "Script started."
 
 [[ "${EUID}" -eq 0 ]] || die "bootstrap.sh must be run as root"
@@ -99,7 +120,7 @@ if ! apt-cache policy amneziawg 2>/dev/null |
      grep -Eq 'Candidate:[[:space:]]+[^ (]'; then
 
     log INFO "Amnezia PPA is required; adding ppa:amnezia/ppa."
-    add-apt-repository -y ppa:amnezia/ppa
+    add_amnezia_ppa
     apt-get update
     log OK "Amnezia PPA added and package lists updated."
 else

@@ -668,6 +668,18 @@ singbox_state_ok()
     return 0
 }
 
+singbox_runs_installed_binary()
+{
+    # The running sing-box keeps the file it was started from: a binary replaced by bootstrap-seg.sh (new
+    # version) is used only after a restart. Compares the file behind the process with the installed one.
+    local pid
+    pid="$(systemctl show -p MainPID --value sing-box.service 2>/dev/null || true)"
+
+    [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 0 )) || return 1
+
+    [[ "$(stat -L -c '%d:%i' "/proc/${pid}/exe" 2>/dev/null)" == "$(stat -c '%d:%i' /usr/local/bin/sing-box 2>/dev/null)" ]]
+}
+
 rollback_singbox()
 {
     if [[ "$SB_WAS_INSTALLED" == "0" ]]; then
@@ -725,8 +737,16 @@ stage_singbox()
     systemctl is-enabled --quiet sing-box.service 2>/dev/null && SB_WAS_ENABLED=1 || true
     [[ -f "$SB_CONFIG_DST" && -f "$SB_UNIT_DST" ]] && SB_WAS_INSTALLED=1 || true
 
+    local binary_stale=0
+
+    if [[ "$SB_WAS_ACTIVE" == "1" ]] && ! singbox_runs_installed_binary; then
+        binary_stale=1
+        log INFO "The running sing-box uses a binary that was replaced: it is restarted."
+    fi
+
     if same_file "$SB_CONFIG_SRC" "$SB_CONFIG_DST" &&
        same_file "$SB_UNIT_SRC" "$SB_UNIT_DST" &&
+       [[ "$binary_stale" == "0" ]] &&
        [[ "$SB_WAS_ACTIVE" == "1" && "$SB_WAS_ENABLED" == "1" ]] &&
        singbox_state_ok "$port" "$server_name" >/dev/null; then
         log OK "sing-box is already current."

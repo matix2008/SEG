@@ -730,7 +730,17 @@ try {
                 Invoke-Remote -IP $node.IP -Command 'install -d -o root -g root -m 700 /root/.seg-sync' -Quiet | Out-Null
 
                 if ($node.Role -eq 'seg-gateway') {
-                    Copy-ToServer -IP $node.IP -Files @($SingBoxPackage) -Destination '/root/.seg-sync/'
+                    # The package (about 30 MB) is needed only for installing or changing the version; the node
+                    # compares versions itself (bootstrap-seg.sh), this read-only query only saves the copy.
+                    $installed = Invoke-Remote -IP $node.IP -AllowFailure -Quiet `
+                        -Command "/usr/local/bin/sing-box version 2>/dev/null | sed -n '1s/^sing-box version //p'"
+
+                    if ($installed.Code -eq 0 -and $installed.Output.Trim() -eq $SingBoxVersion) {
+                        Write-Log -Level 'INFO' -Message "sing-box $SingBoxVersion is already installed on $($node.Name): the package is not copied."
+                    }
+                    else {
+                        Copy-ToServer -IP $node.IP -Files @($SingBoxPackage) -Destination '/root/.seg-sync/'
+                    }
 
                     $arguments = "seg-gateway $SingBoxVersion $SingBoxPackageSha256"
                 }

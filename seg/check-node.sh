@@ -152,6 +152,16 @@ for unit in "${units[@]}"; do
     systemctl is-active --quiet "$unit" 2>/dev/null || bad+=("${unit}:not-active")
 done
 
+# A running sing-box keeps the file it was started from: after a new version is installed it must be restarted.
+if [[ "$ROLE" == "seg-gateway" ]] && systemctl is-active --quiet sing-box.service 2>/dev/null; then
+    sb_pid="$(systemctl show -p MainPID --value sing-box.service 2>/dev/null || true)"
+
+    if [[ "$sb_pid" =~ ^[0-9]+$ ]] && (( sb_pid > 0 )) &&
+       [[ "$(stat -L -c '%d:%i' "/proc/${sb_pid}/exe" 2>/dev/null)" != "$(stat -c '%d:%i' /usr/local/bin/sing-box 2>/dev/null)" ]]; then
+        bad+=("sing-box.service:old-binary")
+    fi
+fi
+
 if [[ "${#bad[@]}" -eq 0 ]]; then
     echo "CHECK SERVICES=OK"
 else
