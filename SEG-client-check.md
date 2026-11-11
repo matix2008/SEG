@@ -51,7 +51,7 @@
    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode SEG all
    ```
 
-   Ожидание: «SEG pair synchronized successfully». `sing-box` на VPS2 перезапускается, текущие подключения прервутся.
+   Что произойдёт: `sync` всегда проходит все этапы подряд (`upgrade`, `bootstrap`, hardening, `snapshot`, fail-closed, маршрутизация, backhaul, egress, `sing-box`, итоговая проверка) и пишет много строк, в том числе `apt-get`; это не переустановка. На готовой паре узлы не перезагружаются и не переустанавливаются, пакеты уже «newest version», настройки fail-closed, backhaul и egress «already current». Меняется только `sing-box` на VPS2 (новые UUID, перезапуск службы), а также перезапускается Fail2Ban. Прогон занимает около 5 минут (из них около минуты копируется пакет `sing-box`). Ожидание: «SEG pair synchronized successfully». Текущие подключения клиентов SEG на время перезапуска `sing-box` прервутся.
 
 4. Проверьте профили:
 
@@ -60,15 +60,16 @@
    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode SEG chk-android
    ```
 
-   Ожидание: профиль `current (seg-list version 1)`.
+   Ожидание: строка `The profile of ИМЯ is current (seg-list version 1)`. Скрипт спросит «The profile is current. Recreate it anyway? [y/N]»: отвечайте **N** (ничего не меняется, код 0); «y» перезапишет профиль теми же данными, и копию на устройстве придётся заменить.
 
-5. Только для Android: сделайте копию профиля без строки `log.output` (на телефоне файл журнала по относительному пути не нужен, журнал смотрят в приложении):
+5. Только для Android: сделайте копию профиля без строки `log.output` (на телефоне файл журнала по относительному пути не нужен, журнал смотрят в приложении). Копия кладётся в отдельный каталог `clients\mobile\` (закрыт `.gitignore`): в `clients\generated\seg\` её класть нельзя, `-Check` посчитает её профилем без записи клиента и вернёт код 2.
 
    ```powershell
+   New-Item -ItemType Directory .\clients\mobile -Force | Out-Null
    $p = [IO.File]::ReadAllText((Resolve-Path .\clients\generated\seg\chk-android.json), [Text.Encoding]::UTF8) | ConvertFrom-Json
    $p.log.PSObject.Properties.Remove('output')
-   [IO.File]::WriteAllText("$PWD\clients\generated\seg\chk-android-mobile.json", ($p | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
-   .\tools\sing-box.exe check -c .\clients\generated\seg\chk-android-mobile.json
+   [IO.File]::WriteAllText("$PWD\clients\mobile\chk-android-mobile.json", ($p | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+   .\tools\sing-box.exe check -c .\clients\mobile\chk-android-mobile.json
    ```
 
    Ожидание: команда `check` ничего не выводит, код 0. Файл без BOM, UTF-8. На телефон передаётся `chk-android-mobile.json`.
@@ -78,7 +79,7 @@
    | Устройство | Что передать |
    |---|---|
    | Windows 11 | `clients\generated\seg\chk-win11.json` |
-   | Android | `clients\generated\seg\chk-android-mobile.json` и APK из части B (шаг B2) |
+   | Android | `clients\mobile\chk-android-mobile.json` и APK из части B (шаг B2) |
 
 ---
 
@@ -149,12 +150,18 @@ Test-NetConnection 77.232.132.91 -Port 443 | Select-Object TcpTestSucceeded
 
 ### A6. Шаг 1: базовая линия (клиент ещё не запущен)
 
+Команды сохраняют значения в переменные и в файлы `x.txt` и `real.txt` (чтобы второе окно из A7 прочитало их само, без ручной подстановки) и печатают их с подписями:
+
 ```powershell
-curl.exe -4 -s https://api.ipify.org
-(Resolve-DnsName chatgpt.com -Type A -DnsOnly | Where-Object Type -eq 'A' | Select-Object -First 1).IPAddress
+$X = (curl.exe -4 -s https://api.ipify.org).Trim()
+$REAL = (Resolve-DnsName chatgpt.com -Type A -DnsOnly | Where-Object Type -eq 'A' | Select-Object -First 1).IPAddress
+Set-Content .\x.txt $X
+Set-Content .\real.txt $REAL
+"X (адрес вашей сети) = $X"
+"REAL (настоящий IPv4 chatgpt.com) = $REAL"
 ```
 
-Первая команда даёт адрес `X`: он не должен совпадать с `<IP_VPS1>` и `<IP_VPS2>`. Вторая — настоящий IPv4-адрес `chatgpt.com` (далее `<REAL_IP>`), он понадобится в шаге 6. Запишите оба значения.
+`$X` не должен совпадать с `<IP_VPS1>` и `<IP_VPS2>`. `$REAL` не должен быть адресом из `198.18.0.0/15`. Запишите оба значения. Выполнять нужно до запуска клиента (шаг A7): с работающим клиентом `$REAL` окажется FakeIP-адресом.
 
 ### A7. Шаг 2: запуск клиента
 
@@ -166,11 +173,14 @@ curl.exe -4 -s https://api.ipify.org
 
 ```powershell
 Set-Location C:\seg-check
+$X = (Get-Content .\x.txt).Trim()
+$REAL = (Get-Content .\real.txt).Trim()
+"X = $X; REAL = $REAL"
 Get-NetAdapter seg-tun | Select-Object Name, Status
-Select-String -Path .\client-tun.log -Pattern 'ERROR|FATAL' | Select-Object -First 5
+Select-String -Path .\client-tun.log -Pattern 'ERROR|FATAL' | Where-Object { $_.Line -notmatch 'outbound/direct\[direct\]' } | Select-Object -First 5
 ```
 
-Ожидание: адаптер `seg-tun` со статусом `Up`, строк с `ERROR` нет. Остальные шаги выполняйте во втором окне.
+Ожидание: адаптер `seg-tun` со статусом `Up`; последняя команда не выводит ничего. Ошибки вида `outbound/direct[direct]: dial tcp ...: i/o timeout` в журнале допустимы: это прямые соединения других программ этого компьютера к посторонним адресам (не из `seg-list`), к SEG они не относятся. Ошибки с `vless`, `reality`, `seg` или `authentication` недопустимы. Остальные шаги выполняйте во втором окне.
 
 ### A8. Шаги 3–6: маршрутизация и DNS
 
@@ -179,6 +189,7 @@ Select-String -Path .\client-tun.log -Pattern 'ERROR|FATAL' | Select-Object -Fir
 curl.exe -4 -s https://chatgpt.com/cdn-cgi/trace | Select-String '^ip='
 
 # 4. ресурс вне seg-list: ожидается X (адрес из шага 1)
+"X = $X"
 curl.exe -4 -s https://api.ipify.org
 
 # 5. DNS: selected-домен получает FakeIP 198.18.x.x, AAAA нет, прямой домен резолвится по-настоящему
@@ -191,10 +202,11 @@ Resolve-DnsName example.com -Type A | Select-Object Name, IPAddress
 
 ```powershell
 # 6. запрос к selected-ресурсу по настоящему IP (без FakeIP): домен определяется по SNI, выход через VPS1
-curl.exe -4 -s --resolve "chatgpt.com:443:<REAL_IP>" https://chatgpt.com/cdn-cgi/trace | Select-String '^ip='
+"REAL = $REAL"
+curl.exe -4 -s --resolve "chatgpt.com:443:$REAL" https://chatgpt.com/cdn-cgi/trace | Select-String '^ip='
 ```
 
-Подставьте `<REAL_IP>` из шага 1. Ожидание: `ip=65.20.77.164`.
+Ожидание: `REAL` — настоящий адрес chatgpt.com (не `$X`, не `198.18.x.x`, не пусто), ответ `ip=65.20.77.164`. Если ответ пустой, сначала убедитесь, что `$REAL` задан правильно.
 
 ### A9. Шаги 7–8: проверки с ноутбука проекта
 
@@ -223,6 +235,8 @@ Remove-Item C:\seg-check -Recurse -Force
 ---
 
 ## Часть B. Android
+
+> **Статус:** часть B не проверялась на устройстве. На Windows 11 проверка выполнена полностью; для Android принято считать её дублирующей (правила маршрутизации и DNS в профиле те же), а пошаговые действия (меню SFA, импорт профиля) описаны по документации и могут отличаться на вашем телефоне. Профиль для Android проверен только командой `sing-box check`.
 
 Нужен телефон на Android (для Android 5 в релизе есть отдельные сборки `legacy-android-5`, на более новых используйте обычную сборку), доступ в Интернет (Wi-Fi или мобильная сеть), кабель USB и ноутбук для проверки файла.
 
@@ -313,11 +327,17 @@ Remove-Item C:\seg-check -Recurse -Force
 
 ### Шаг 7: клиент виден на VPS2, домен передан
 
+Время в журнале VPS2 указано в UTC (Москва = UTC+3). Окно берите с запасом: проверка идёт не сразу после шага 3. Выполняйте на ноутбуке проекта:
+
 ```powershell
-ssh root@77.232.132.91 "journalctl -u sing-box --since '-5min' --no-pager | grep -F chk-win11 | grep -F chatgpt.com"
+# входящие соединения клиента с именем домена
+ssh root@77.232.132.91 "journalctl -u sing-box --since '-60min' --no-pager | grep -F chk-win11 | grep -F chatgpt.com | tail -5"
+
+# исходящие на VPS1 (в строке нет имени клиента: соединения связаны номером в [...] со строкой inbound)
+ssh root@77.232.132.91 "journalctl -u sing-box --since '-60min' --no-pager | grep -F 'outbound/direct[seg-out]' | grep -F chatgpt.com | tail -5"
 ```
 
-(для телефона замените `chk-win11` на `chk-android`). Ожидание: строки `inbound connection to chatgpt.com:443` от клиента (домен получен как имя, не как IP) и `outbound connection to chatgpt.com:443` через `seg-out`. Для прямого ресурса (`api.ipify.org`) строк быть не должно: он не доходил до VPS2.
+(для телефона замените `chk-win11` на `chk-android`). Ожидание: в первой команде строки `inbound connection to chatgpt.com:443` от клиента (домен получен как имя, не как IP), во второй `outbound connection to chatgpt.com:443` через `seg-out`. Для прямого ресурса (`api.ipify.org`) строк быть не должно: он не доходил до VPS2. Если вывод пуст, проверьте, что шаг 3 выполнялся при включённом клиенте и что окно (`-60min`) охватывает его время.
 
 ### Шаг 8: fail-closed
 
@@ -329,10 +349,21 @@ ssh root@77.232.132.91 "systemctl stop awg-quick@awg-backhaul"
 
 Теперь на устройстве три раза подряд (с интервалом несколько секунд) запросите selected-ресурс:
 
-- Windows: `curl.exe -4 -s -m 10 https://chatgpt.com/cdn-cgi/trace` (во втором окне);
+- Windows (во втором окне):
+
+  ```powershell
+  1..3 | ForEach-Object { curl.exe -4 -s -m 10 -o NUL -w "http=%{http_code}`n" https://chatgpt.com/cdn-cgi/trace; Start-Sleep 3 }
+  ```
+
 - Android: <https://chatgpt.com/cdn-cgi/trace> во вкладке «Инкогнито».
 
-Ожидание: ресурс **не открывается**, и ни разу не показывается `ip=77.232.132.91` (`<IP_VPS2>`). Прямой запрос (`https://api.ipify.org`) продолжает работать и показывает `X`. Затем верните узлы:
+Ожидание: ресурс **не открывается** (на Windows `http=000` три раза, то есть ответа нет), и ни разу не показывается `ip=77.232.132.91` (`<IP_VPS2>`). Прямой запрос (`https://api.ipify.org`) продолжает работать и показывает `X`. Затем подтвердите причину по журналу VPS2 (на ноутбуке проекта):
+
+```powershell
+ssh root@77.232.132.91 "journalctl -u sing-box --since '-10min' --no-pager | grep -F 'no route to host' | tail -3"
+```
+
+Ожидание: строки `dial tcp ...: connect: no route to host` через `outbound/direct[seg-out]` (backhaul остановлен, выхода на VPS1 нет, а запасного выхода через VPS2 нет). Счётчик drop-правила в таблице `seg_failclosed` может при этом остаться нулевым: соединение привязано к остановленному интерфейсу backhaul и до правила не доходит (само правило проверено в п. 38), по нему судить не нужно. Затем верните узлы:
 
 ```powershell
 cd "C:\Разное\VPN\SEG"
@@ -352,7 +383,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 cd "C:\Разное\VPN\SEG"
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\remove-client.ps1 -Mode SEG chk-win11
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\remove-client.ps1 -Mode SEG chk-android
-Remove-Item .\clients\generated\seg\chk-android-mobile.json -ErrorAction SilentlyContinue
+Remove-Item .\clients\mobile -Recurse -Force -ErrorAction SilentlyContinue
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode SEG all
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode SEG all -Check
 ```
@@ -366,13 +397,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 | Шаг | Ожидание | Windows 11 | Android |
 |---|---|---|---|
 | 1 | адрес сети `X`, не узлы | | |
-| 2 | клиент запущен, адаптер/значок VPN есть, `ERROR` нет | | |
+| 2 | клиент запущен, адаптер/значок VPN есть, нет ошибок `vless`/`reality`/`seg` (таймауты `outbound/direct` к посторонним адресам допустимы) | | |
 | 3 | `chatgpt.com`: `ip=<IP_VPS1>` | | |
 | 4 | `api.ipify.org`: `X` | | |
 | 5 | selected: `198.18.x.x`, AAAA нет; прямой: настоящий адрес | | (по Windows) |
 | 6 | по настоящему IP без FakeIP: `ip=<IP_VPS1>` (только Windows) | | — |
 | 7 | домен виден в журнале VPS2 | | |
-| 8 | fail-closed: не открывается, `ip=<IP_VPS2>` ни разу; прямой трафик работает; после `sync` всё возвращается | | |
+| 8 | fail-closed: `http=000` три раза, `ip=<IP_VPS2>` ни разу, в журнале VPS2 `no route to host`; прямой трафик работает; после `sync` всё возвращается | | |
 | 9 | остановка: адаптер/значок исчез, адрес снова `X` | | |
 
 ## Если что-то не прошло
