@@ -1,6 +1,6 @@
 # SEG — Selective Egress Gateway
 
-**Версия продукта: 1.2**
+**Версия продукта: 1.3**
 
 Выборочная маршрутизация трафика устройства: выбранные ресурсы выходят в Интернет через узел `seg-exit`, остальной трафик идёт напрямую. Дополнительный режим проекта — управление несколькими AmneziaWG-серверами (раздел 12).
 
@@ -173,6 +173,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 | `tools\` | `sing-box.exe`, `libcronet.dll`, Linux-пакет `sing-box` | SEG | нет | скачивается вручную (раздел 3) | нет, скачивается заново |
 | `seg\` | скрипты узлов (`*.sh`), шаблоны `{{VAR}}`, `sing-box.sha256` | SEG | нет | в git | в git |
 | `scripts\` | управляющие скрипты, `scripts\seg\` (SEG), `scripts\lib\` (библиотеки) | оба | нет | в git | в git |
+| `tests\` | регрессионные тесты: офлайн (`run-offline.ps1` и `test-*.ps1`, раздел 11.5) и live-тесты с доступом к узлам (`tests\live\`) | SEG | нет | в git | в git |
 | `logs/amnezia.log` | общий журнал (ротация при 10 МБ, три архива) | оба | нет (IP и имена) | автоматически | нет |
 | `config/server.env`, `config/server.env.*.bak` | серверные ключи и параметры AWG | VPN | **да** | `generate-server-env.ps1 -Mode VPN` | да (`.bak` нет) |
 | `config/awg0.conf.template` | серверный шаблон и все peer | VPN | **да** | из `.example` и `add-client.ps1 -Mode VPN` | да |
@@ -1172,6 +1173,13 @@ Ping `seg-exit` по backhaul не проходит намеренно (в INPUT
 - **SSH.** Короткая проверка имеет hard timeout 15 секунд; рабочие SSH/SCP-сессии используют keepalive и не ограничивают длительность upgrade и bootstrap. При обрыве SSH во время `upgrade.sh` скрипт ждёт возврата SSH и повторяет upgrade (до 4 попыток); `upgrade.sh` и `bootstrap-seg.sh` ждут блокировку apt/dpkg до 300 секунд. Добавление PPA AmneziaWG при временном отказе Launchpad повторяется до 3 раз с паузой 25 с.
 - **Ручной `ufw reload`** таблицу `seg_failclosed` не затрагивает (она отдельная от правил UFW), ничего перезапускать после него не нужно.
 - **Управляющий компьютер.** Если на нём включён full-tunnel клиент (например, AmneziaWG), SSH к узлам идёт через его туннель: это допустимо, но не отключайте и не перезапускайте туннель во время прогона.
+- **Регрессионные тесты** лежат в `tests\`. Офлайн-набор не обращается к узлам и ничего на них не меняет; запускается после любого изменения скриптов, шаблонов или `seg-list.json`:
+
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-offline.ps1
+  ```
+
+  Нужны `servers.txt` и `config\seg.env` настроенного проекта (разделы 5.3, 5.4). Итог: по строке на тест (`OK` или `FAILED` с числом проверок) и код выхода 0 при отсутствии ошибок. Live-тесты в `tests\live\` проверяют поведение на реальных узлах и запускаются вручную, по одному, не параллельно с `sync`, на рабочей паре после успешного полного `sync`: `test-check-drift.ps1` (отклонения состояния для `-Check`), `test-rollback.ps1 -Scenario KeyRotationExit|KeyRotationSingBox|FirstSingBox` (откат при ошибке), `test-migration-e2e.ps1` (миграция формата `servers.txt`, временно меняет файл), `test-failclosed-e2e.ps1 -ClientName ИМЯ` (fail-closed при сбоях backhaul, включая перезагрузку узлов; нужен клиент SEG, известный VPS2). Каждый live-тест возвращает изменённое состояние, но его прерывание может оставить узлы изменёнными: после прерывания выполните `sync-servers.ps1 -Mode SEG all`.
 
 ### 11.6. Ограничения и риски
 
