@@ -1,6 +1,6 @@
 # SEG — Selective Egress Gateway
 
-**Версия продукта: 1.1**
+**Версия продукта: 1.2**
 
 Выборочная маршрутизация трафика устройства: выбранные ресурсы выходят в Интернет через узел `seg-exit`, остальной трафик идёт напрямую. Дополнительный режим проекта — управление несколькими AmneziaWG-серверами (раздел 12).
 
@@ -165,7 +165,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 | `config/seg.env` | параметры SEG: REALITY, backhaul, метки, политика | SEG | **да** | `generate-server-env.ps1 -Mode SEG` | **да** |
 | `config/seg.env.<время>.bak` | копии прежних `seg.env` (три последние, без шифрования) | SEG | **да** | при генерации и `-Restore` | нет (содержат старые ключи) |
 | `config/seg.env.example` | образец формата | SEG | нет | в git | в git |
-| `config/seg-list.json` | список ресурсов, идущих через VPS1 | SEG | нет | в git, правится вручную | в git |
+| `config/seg-list.json` | список ресурсов, идущих через VPS1 (в git лежит стартовый образец) | SEG | нет | в git, актуализируется вручную (раздел 5.5) | в git |
 | `clients/seg/<имя>.json` | запись SEG-клиента: имя, UUID, `enabled`, дата | SEG | **да** (UUID) | `add-client.ps1 -Mode SEG` | **да** |
 | `clients/generated/seg/<имя>.json` | выдаваемый профиль `sing-box` | SEG | **да** (UUID). Публичный ключ REALITY и `short_id` передаются клиенту и сами по себе доступа не дают, но не публикуются; приватного ключа REALITY в профиле нет | `add-client.ps1`, `make-client-config.ps1` | можно не копировать |
 | `clients/generated/seg/<имя>.meta.json` | метаданные профиля (версия списка, хэши) | SEG | нет | вместе с профилем | можно не копировать |
@@ -277,17 +277,40 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-server-en
 
 **Результат:** `Test-Path .\config\seg.env` возвращает `True`, скрипт завершился с кодом 0, резервная копия `seg.env` сделана.
 
-### 5.5. Проверить список ресурсов
+### 5.5. Создать или актуализировать список ресурсов
 
-**Цель:** убедиться, что правила маршрутизации (`config/seg-list.json`) корректны и известна их версия.
+**Цель:** получить актуальный `config/seg-list.json` — перечень ресурсов, которые пойдут через `seg-exit` — и проверить его.
 
-Список `config/seg-list.json` входит в git и готов к работе. Проверка:
+Файл `config/seg-list.json` в git — стартовый **образец**: группы GitHub, GitHub Copilot, ChatGPT / OpenAI, Facebook / Messenger, Telegram, YouTube с источниками на дату их составления (поле `sources`). Сервисы меняют домены и адреса, а часть групп составлена по наблюдениям, поэтому перед развёртыванием приведите файл в соответствие со своими задачами. Если образец не подходит, создайте файл заново по формату из раздела 8.3 (минимальный вариант — одна группа с обязательными полями `name`, `title`, `enabled`, `domains`, `domain_suffixes`, `cidrs`, `sources`).
 
-```powershell
-powershell -NoProfile -Command ". .\scripts\lib\seglist.ps1; Read-SegList .\config\seg-list.json | Format-List Version,Sha256,EnabledGroups"
-```
+1. **Определите состав.** Для групп, которые не нужны, поставьте `"enabled": false` или удалите их. Для нужного ресурса добавьте группу или запись в существующую (задачи и действия — таблица в разделе 7.4).
+2. **Обновите группы по источникам.**
+   - GitHub и GitHub Copilot — по документации API (`domains.website`, `domains.packages`, `domains.copilot`). Выведите актуальные значения и сверьте их с группами `github` и `github-copilot`:
 
-**Результат:** команда без ошибок выводит `Version`, `Sha256` и список включённых групп `EnabledGroups`.
+     ```powershell
+     $meta = Invoke-RestMethod -UseBasicParsing -Uri https://api.github.com/meta
+     @($meta.domains.website; $meta.domains.packages; $meta.domains.copilot) | Sort-Object -Unique
+     ```
+
+   - Telegram — IPv4-диапазоны из официального списка (IPv6 в SEG не поддерживается). Выведите актуальные значения и сверьте их с `cidrs` группы `telegram`:
+
+     ```powershell
+     (Invoke-WebRequest -UseBasicParsing -Uri https://core.telegram.org/resources/cidr.txt).Content -split "\r?\n" | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+/\d+$' }
+     ```
+
+   - ChatGPT / OpenAI, Facebook / Messenger, YouTube и другие сервисы: официального списка нет. Составляйте перечень по именам хостов, которые сервис реально использует (сетевая вкладка инструментов разработчика в браузере или журнал клиента из раздела 6: хосты, которые должны идти через `seg-exit`, видны в нём как `outbound/direct`). Для видео YouTube недостаточно основного домена (раздел 8.3). Список можно дополнить после первого подключения устройства по процедуре раздела 7.4.
+3. **Перенесите значения в формат файла.** В `domain_suffixes` записывайте домен без `*.` и без точки в начале (`*.github.com` → `github.com`: правило охватывает домен и все поддомены; поддомен уже перечисленного домена добавлять не нужно). Точное имя без поддоменов — в `domains`. IPv4-диапазоны — в `cidrs`, только сетевой адрес с префиксом от 8 до 32 (например, `91.108.4.0/22`). Всё в нижнем регистре, без дублей. В `sources` укажите источник и дату проверки.
+4. **Версия.** Для первого развёртывания `version` можно не менять. Если список уже применялся на серверах и клиентам выданы профили, повышайте `version` на единицу при каждом изменении (раздел 7.4).
+5. **Проверьте файл:**
+
+   ```powershell
+   powershell -NoProfile -Command ". .\scripts\lib\seglist.ps1; Read-SegList .\config\seg-list.json | Format-List Version,Sha256,EnabledGroups"
+   ```
+
+   Валидатор сообщает обо всех ошибках сразу: неверное имя или запись, IPv6, частные диапазоны, пересечение с FakeIP, дубли, включённая группа без записей, неизвестные поля. Исправьте и повторите проверку.
+6. Сохраните изменённый файл в git (список хранится в проекте): его хэш `Sha256` определяет, актуален ли профиль клиента.
+
+**Результат:** проверка завершается без ошибок и выводит `Version`, `Sha256` и список включённых групп `EnabledGroups`, соответствующий вашим задачам.
 
 ### 5.6. Развернуть пару
 
