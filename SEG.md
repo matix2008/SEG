@@ -847,7 +847,7 @@ Server-side `seg-list` применяется независимо от верс
 
 ## 22. IPv6
 
-DIRECT traffic клиента может использовать локальный IPv6.
+DIRECT traffic клиента может использовать локальный IPv6 (не проверено: профиль задаёт `dns.strategy = ipv4_only` и TUN с одним IPv4-адресом, поведение IPv6 зависит от платформы и `strict_route`).
 
 Selected traffic использует IPv4, пока IPv6 egress VPS1 отдельно не включён и не проверен.
 

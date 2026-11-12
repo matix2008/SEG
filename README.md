@@ -130,7 +130,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 | `config/seg.env.example` | образец формата | SEG | нет | в git | в git |
 | `config/seg-list.json` | список ресурсов, идущих через VPS1 | SEG | нет | в git, правится вручную | в git |
 | `clients/seg/<имя>.json` | запись SEG-клиента: имя, UUID, `enabled`, дата | SEG | **да** (UUID) | `add-client.ps1 -Mode SEG` | **да** |
-| `clients/generated/seg/<имя>.json` | выдаваемый профиль `sing-box` | SEG | **да** (UUID; публичный ключ REALITY и `short_id` не секретны, приватного ключа REALITY в профиле нет) | `add-client.ps1`, `make-client-config.ps1` | можно не копировать |
+| `clients/generated/seg/<имя>.json` | выдаваемый профиль `sing-box` | SEG | **да** (UUID). Публичный ключ REALITY и `short_id` передаются клиенту и сами по себе доступа не дают, но не публикуются; приватного ключа REALITY в профиле нет | `add-client.ps1`, `make-client-config.ps1` | можно не копировать |
 | `clients/generated/seg/<имя>.meta.json` | метаданные профиля (версия списка, хэши) | SEG | нет | вместе с профилем | можно не копировать |
 | `clients/mobile/<имя>-mobile.json` | копия профиля без `log.output` для Android (по сценарию из раздела 6.4) | SEG | **да** | вручную | нет, удалять после переноса |
 | `tools\` | `sing-box.exe`, `libcronet.dll`, Linux-пакет `sing-box` | SEG | нет | скачивается вручную (раздел 3) | нет, скачивается заново |
@@ -268,7 +268,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 ### 6.1. Перед подключением (любая платформа)
 
 1. Профиль клиента создаётся на управляющем компьютере (сценарий «Добавить устройство», раздел 7) и перед передачей проверяется: `make-client-config.ps1 -Mode SEG ИМЯ` должен показать `current`. UUID должен быть добавлен на VPS2 (`sync-servers.ps1 -Mode SEG all` после `add-client`), иначе клиент не подключится.
-2. Профиль содержит UUID клиента, публичный ключ REALITY и `short_id`. Секретен он из-за UUID (с ним можно пользоваться VPS2); приватного ключа REALITY в профиле нет. Передавайте профиль только по защищённому каналу (кабель, флешка), не через мессенджеры, почту и облако; после переноса удалите промежуточные копии.
+2. Профиль содержит UUID клиента, публичный ключ REALITY и `short_id`. Секретен он из-за UUID (с ним можно пользоваться VPS2); публичный ключ и `short_id` без UUID доступа не дают, но не публикуются; приватного ключа REALITY в профиле нет. Передавайте профиль только по защищённому каналу (кабель, флешка), не через мессенджеры, почту и облако; после переноса удалите промежуточные копии.
 3. На устройстве отключите другие VPN (AmneziaWG, Hiddify и т. п.): на Windows kill-switch full-tunnel AmneziaWG блокирует клиент SEG, на Android одновременно работает один VPN.
 4. Нужен `sing-box` версии 1.14.4. Профиль строится под неё; другие версии не проверялись.
 
@@ -461,7 +461,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -
 
 ### 7.8. Заменить или перенести узел
 
-Порядок для `seg-exit`, `seg-gateway`, переустановки образа и смены IP — раздел 11.2. Кратко для `seg-exit`: создать новый VPS и сверить host key, заменить IP в `servers.txt`, `ssh-keygen -R СТАРЫЙ_IP`, **остановить старый узел до `sync`** (`ssh root@СТАРЫЙ_IP "systemctl disable --now seg-exit-keepalive awg-quick@awg-backhaul"` или уничтожить его), затем `sync-servers.ps1 -Mode SEG all` и `-Check` (`EGRESS_IP` нового узла); профили клиентов остаются прежними. Для `seg-gateway` клиентам нужны новые профили (раздел 7.3).
+Порядок для `seg-exit`, `seg-gateway`, переустановки образа и смены IP — раздел 11.2. Кратко для `seg-exit`: создать новый VPS и сверить его host key, **остановить старый узел до `sync`** (`ssh root@СТАРЫЙ_IP "systemctl disable --now seg-exit-keepalive awg-quick@awg-backhaul"` или уничтожить его), заменить IP в `servers.txt`, выполнить `sync-servers.ps1 -Mode SEG all` и `-Check` (`EGRESS_IP` нового узла, код 0), после этого `ssh-keygen -R СТАРЫЙ_IP`; профили клиентов остаются прежними. Для `seg-gateway` порядок другой (раздел 11.2): клиентам нужны новые профили (раздел 7.3), `-Check` даёт код 0 только после их пересоздания.
 
 ### 7.9. Ротация ключей, компрометация, восстановление на другом компьютере
 
@@ -510,7 +510,8 @@ seg-eu;198.51.100.30;;seg-exit;amnezia;true
 
 | Группа | Параметры | Секрет | Кто задаёт |
 |---|---|---|---|
-| REALITY | `SEG_REALITY_PRIVATE_KEY`, `SEG_REALITY_PUBLIC_KEY`, `SEG_REALITY_SHORT_ID` | да (приватный ключ и `short_id`) | генератор, заново при каждой генерации |
+| REALITY: приватный ключ | `SEG_REALITY_PRIVATE_KEY` | **да** (только узел `seg-gateway` и `seg.env`) | генератор, заново при каждой генерации |
+| REALITY: публичный ключ и `short_id` | `SEG_REALITY_PUBLIC_KEY`, `SEG_REALITY_SHORT_ID` | нет в смысле доступа: передаются клиентам в профиле, без UUID по ним подключиться нельзя; не публикуйте их (хранятся в `seg.env` вместе с секретами) | генератор, заново при каждой генерации |
 | REALITY | `SEG_REALITY_SERVER_NAME`, `SEG_REALITY_DEST` (`host:port`), `SEG_REALITY_FLOW`, `SEG_REALITY_FINGERPRINT` | нет | по умолчанию `www.microsoft.com`; сохраняются при перегенерации, можно править |
 | Backhaul: ключи | `SEG_BACKHAUL_PRIVATE_KEY_VPS1/VPS2`, `SEG_BACKHAUL_PUBLIC_KEY_VPS1/VPS2`, `SEG_BACKHAUL_PSK` | да (приватные ключи, PSK) | генератор |
 | Backhaul: сеть | `SEG_BACKHAUL_NETWORK` (/30), `SEG_BACKHAUL_VPS1`, `SEG_BACKHAUL_VPS2`, `SEG_BACKHAUL_PORT` (UDP), `SEG_BACKHAUL_INTERFACE` (не `awg0`) | нет | по умолчанию `10.77.0.0/30` (VPS1 — `10.77.0.2`, VPS2 — `10.77.0.1`), порт 42100, `awg-backhaul`; сохраняются |
@@ -626,13 +627,13 @@ seg-eu;198.51.100.30;;seg-exit;amnezia;true
 | `dns.rules[0].rule_set` | `[seg-domains]` | `seg-list.json` | к каким доменам применяется правило | меняется при изменении списка |
 | `dns.rules[0].action`, `dns.rules[0].server` | `route`, `dns-fakeip` | шаблон | домены из списка получают FakeIP; настоящий запрос выполняет VPS2 через VPS1 | — |
 | `dns.final` | `dns-direct` | шаблон | сервер для всех остальных доменов (настоящие адреса) | — |
-| `dns.strategy` | `ipv4_only` | шаблон | запрашивать только записи A: AAAA для selected не выдаётся (IPv6 в SEG не включён, раздел 11.6) | — |
+| `dns.strategy` | `ipv4_only` | шаблон | стратегия по умолчанию для всех доменных запросов в этой DNS-настройке: только записи A | **Проверено:** для selected-доменов AAAA не возвращается. Так как поле глобальное, того же ожидают и для обычных доменов (клиент не узнаёт их IPv6-адреса через DNS), но это на устройстве не проверялось. Соединения по готовому IPv6-адресу (без DNS) от этого поля не зависят: у адаптера только IPv4-адрес, поведение IPv6 зависит от платформы и `strict_route`, на тестовом канале IPv6 не было (раздел 11.6) |
 | `inbounds[0].type` | `tun` | шаблон | перехват трафика всего устройства через виртуальный сетевой адаптер | Windows и Linux: нужны права администратора/root. Android: TUN создаёт приложение, не проверялось |
 | `inbounds[0].tag` | `tun-in` | шаблон | имя входа | — |
 | `inbounds[0].interface_name` | `seg-tun` | шаблон | имя адаптера | исчезает вместе с процессом |
 | `inbounds[0].address` | `["172.19.0.1/30"]` | шаблон | внутренний адрес адаптера | не должен пересекаться с вашими сетями |
 | `inbounds[0].auto_route` | `true` | шаблон | `sing-box` сам настраивает маршруты ОС, направляя весь трафик в TUN | при аварийном завершении маршруты снимаются вместе с адаптером |
-| `inbounds[0].strict_route` | `true` | шаблон | трафик не может обойти TUN (через другие интерфейсы), в том числе DNS | именно поэтому порт 53 на Windows блокируется |
+| `inbounds[0].strict_route` | `true` | шаблон | по документации `sing-box`: делает недоступными сети, которые TUN не поддерживает; на Windows дополнительно блокирует DNS (порт 53) в обход TUN и закрывает утечки DNS при нескольких интерфейсах | Это **не гарантия перехвата всего трафика** (приложения со своими адаптерами и туннелями, другие VPN) и **не клиентский fail-closed**: при остановке или падении `sing-box` адаптер и маршруты исчезают, устройство работает напрямую, и selected-ресурсы выходят с обычного адреса клиента. Именно из-за блокировки порта 53 на Windows прямой DNS в профиле — DoH |
 | `inbounds[0].stack` | `mixed` | шаблон | сетевой стек TUN: смешанный (TCP — системный стек, UDP — gVisor) | — |
 | `outbounds[0].type` | `vless` | шаблон | выход на VPS2 по протоколу VLESS | — |
 | `outbounds[0].tag` | `seg` | шаблон | имя выхода: на него ссылается `route.rules[4]` | — |
@@ -678,8 +679,18 @@ seg-eu;198.51.100.30;;seg-exit;amnezia;true
 
 ### 9.2. `generate-server-env.ps1`
 
+Синтаксис (обозначения: `[ ]` — необязательный элемент, `|` — выбор одного значения; блок не предназначен для копирования):
+
+```text
+generate-server-env.ps1 -Mode VPN|SEG [-Force] [-NoBackup] [-Restore]
+```
+
+Примеры (выполняются как есть из корня проекта):
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-server-env.ps1 -Mode VPN|SEG [-Force] [-NoBackup] [-Restore]
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-server-env.ps1 -Mode SEG
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-server-env.ps1 -Mode SEG -Restore
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-server-env.ps1 -Mode SEG -Force -NoBackup
 ```
 
 | Параметр | Действие |
@@ -698,9 +709,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-server-en
 
 ### 9.3. `add-client.ps1`
 
+Синтаксис (`[ ]` — необязательный элемент; блок не предназначен для копирования):
+
+```text
+add-client.ps1 -Mode SEG [ИМЯ]
+add-client.ps1 -Mode VPN [ИМЯ] [СЕРВЕР]
+```
+
+Примеры:
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mode SEG [ИМЯ]
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mode VPN [ИМЯ] [СЕРВЕР]
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mode SEG laptop-anna
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mode VPN laptop-anna vpn-01
 ```
 
 - **SEG:** создаёт запись `clients/seg/ИМЯ.json` со случайным UUID и профиль `clients/generated/seg/ИМЯ.json` с `ИМЯ.meta.json`. Без имени спрашивает «Client name». Сначала проверяет конфигурацию (`seg.env`, `seg-list.json`, пара узлов в `servers.txt`), строит и проверяет профиль (структура и `sing-box check`), затем спрашивает «Create client?» и только после подтверждения пишет файлы (запись, затем профиль; при сбое запись удаляется). Отказывается работать, если клиент уже есть или рядом лежат файлы профиля без записи.
@@ -710,8 +730,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mo
 
 ### 9.4. `remove-client.ps1`
 
+Синтаксис (`|` — выбор одного значения, `[ ]` — необязательный элемент; блок не предназначен для копирования):
+
+```text
+remove-client.ps1 -Mode SEG|VPN [ИМЯ]
+```
+
+Пример:
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\remove-client.ps1 -Mode SEG|VPN [ИМЯ]
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\remove-client.ps1 -Mode SEG laptop-anna
 ```
 
 - **SEG:** удаляет профиль `clients/generated/seg/ИМЯ.json`, `ИМЯ.meta.json` и запись `clients/seg/ИМЯ.json` (профиль первым: при сбое запись остаётся, команду можно повторить). Имя ищется без учёта регистра и до использования в путях проверяется. Спрашивает «Remove client?». Нет клиентов — ошибка «There are no SEG clients». Если не остаётся включённых клиентов, выводится предупреждение.
@@ -720,9 +748,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\remove-client.ps1 
 
 ### 9.5. `make-client-config.ps1`
 
+Синтаксис (`[ ]` — необязательный элемент; блок не предназначен для копирования):
+
+```text
+make-client-config.ps1 -Mode SEG [ИМЯ]
+make-client-config.ps1 -Mode VPN [ИМЯ] [СЕРВЕР]
+```
+
+Примеры:
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode SEG [ИМЯ]
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode VPN [ИМЯ] [СЕРВЕР]
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode SEG laptop-anna
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode VPN laptop-anna vpn-01
 ```
 
 - **SEG:** создаёт или пересоздаёт профиль `clients/generated/seg/ИМЯ.json` и `ИМЯ.meta.json`. Перед запросом имени выводит состояние профилей всех клиентов (раздел 8.4). Профиль строится из шаблона, `seg.env`, `seg-list.json`, `servers.txt` и UUID, проверяется (структура и `sing-box check`) и записывается через временные файлы. Устаревший, отсутствующий и повреждённый профиль создаётся после «Create the profile?»; актуальный пересоздаётся только после «The profile is current. Recreate it anyway?» (по умолчанию «нет»: файл не меняется, код 0). Для отключённого клиента — ошибка (сначала включите клиента, раздел 7.4).
@@ -731,9 +768,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config
 
 ### 9.6. `sync-servers.ps1`
 
+Синтаксис (`[ ]` — необязательный элемент, `|` — выбор одного значения; блок не предназначен для копирования):
+
+```text
+sync-servers.ps1 -Mode SEG all [-Check]
+sync-servers.ps1 -Mode VPN [СЕРВЕР|all] [-Check]
+```
+
+Примеры:
+
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode SEG all [-Check]
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode VPN [СЕРВЕР|all] [-Check]
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode SEG all -Check
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode SEG all
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode VPN all -Check
 ```
 
 - **SEG:** приводит пару узлов к локальному источнику истины (этапы — раздел 10.1). Только цель `all`; без цели спрашивает «Target». Ошибка или недоступность одного узла останавливает обработку второго (`SKIPPED`). Подтверждение запрашивается один раз: «Reboot IP and continue the upgrade?» (если узлу нужна перезагрузка; «нет» оставляет узел `PENDING`). Hardening в режиме SEG отдельного подтверждения не требует.
@@ -869,13 +916,21 @@ Ping `seg-exit` по backhaul не проходит намеренно (в INPUT
 
 - **Замена `seg-exit` (VPS1) или смена его IP.** Порядок важен: **старый узел останавливается до `sync`**. Пока он работает с теми же ключами backhaul, VPS2 продолжает принимать его пакеты даже после замены правила UFW, пир backhaul остаётся за старым адресом, и итоговая проверка пары покажет `EGRESS_IP` старого узла («expected …»).
   1. Создайте новый VPS (Ubuntu 24.04), выполните первый SSH-вход со сверкой host key (раздел 5.2).
-  2. Замените IP в строке `seg-exit` в `servers.txt` и удалите старую запись `ssh-keygen -R СТАРЫЙ_IP`.
-  3. **Остановите старый узел** (если он ещё доступен): `ssh root@СТАРЫЙ_IP "systemctl disable --now seg-exit-keepalive awg-quick@awg-backhaul"` (`disable` не даст службам вернуться после его перезагрузки) или уничтожьте его у провайдера. С этого момента selected-запросы не проходят (fail-closed) до окончания следующего шага.
+  2. **Остановите старый узел**, пока его ключ хоста ещё в `known_hosts` (если он доступен): `ssh root@СТАРЫЙ_IP "systemctl disable --now seg-exit-keepalive awg-quick@awg-backhaul"` (`disable` не даст службам вернуться после его перезагрузки) или уничтожьте его у провайдера. С этого момента selected-запросы не проходят (fail-closed) до окончания шага 4.
+  3. Замените IP в строке `seg-exit` в `servers.txt`.
   4. `sync-servers.ps1 -Mode SEG all`: новый узел проходит весь порядок развёртывания (раздел 10.1), на VPS2 правило UFW для UDP-порта backhaul переписывается на новый IP (старое `seg:backhaul-udp:ПОРТ:СТАРЫЙ_IP` удаляется как устаревшее, остальные правила не трогаются), в `seg-exit.nft` подставляется новый публичный IP VPS1. VPS1 сам устанавливает соединение, так что после запуска нового узла backhaul поднимается без действий на VPS2. Узел с другим ядром потребует перезагрузки: `sync` спросит подтверждение (раздел 10.1).
-  5. Проверьте `sync-servers.ps1 -Mode SEG all -Check`: `EGRESS_IP` равен IP нового узла, код 0. Затем уничтожьте старый VPS у провайдера.
+  5. Проверьте `sync-servers.ps1 -Mode SEG all -Check`: `EGRESS_IP` равен IP нового узла, код 0 (профили клиентов не менялись и остаются `CURRENT`).
+  6. Только теперь, когда доступ к старому узлу больше не нужен, удалите его запись из `known_hosts` (`ssh-keygen -R СТАРЫЙ_IP`) и уничтожьте старый VPS у провайдера.
   
   Профили клиентов не меняются: в них нет адреса VPS1. Если старый узел скомпрометирован, одной замены IP недостаточно: смените ключи backhaul (раздел 11.3).
-- **Замена `seg-gateway` (VPS2) или смена его IP:** тот же порядок для строки `seg-gateway`; после `sync` уничтожьте старый шлюз (он продолжает принимать клиентов со старыми профилями, пока работает). Дополнительно: на VPS1 меняется `Endpoint` backhaul (применяется тем же `sync`), а профили клиентов устаревают по параметрам подключения (меняется адрес сервера): `-Check` и `sync` показывают `STALE`, клиенты не смогут подключиться, пока не получат профиль, созданный `make-client-config.ps1 -Mode SEG` (раздел 7.3). Ключи REALITY, UUID клиентов и `seg-list` остаются прежними.
+- **Замена `seg-gateway` (VPS2) или смена его IP или порта.** Здесь порядок другой: клиенты подключаются к шлюзу напрямую, поэтому их профили нужно заменить, а старый шлюз остановить только после этого (если шлюз скомпрометирован или должен быть отключён немедленно, остановите его сразу, клиенты потеряют доступ до получения новых профилей).
+  1. Создайте новый VPS (Ubuntu 24.04), выполните первый SSH-вход со сверкой host key (раздел 5.2).
+  2. Замените IP (и при необходимости `Port`) в строке `seg-gateway` в `servers.txt`.
+  3. `sync-servers.ps1 -Mode SEG all`: новый шлюз получает `sing-box`, fail-closed и backhaul, на VPS1 меняется `Endpoint` backhaul, на новом VPS2 правило UFW принимает backhaul только с IP VPS1. С этого момента VPS1 подключается уже к новому адресу, а старый шлюз сам backhaul не инициирует (VPS2 только слушает), поэтому по схеме selected-запросы через него не проходят (отдельно на двух живых шлюзах не проверялось).
+  4. `-Check`: пара актуальна (`GATEWAY=READY`, `EXIT=READY`, `BACKHAUL=UP`, `SECURITY=OK`), а профили клиентов `STALE` («connection parameters changed»), поэтому код выхода **2**. Это ожидаемо.
+  5. Для каждого клиента `make-client-config.ps1 -Mode SEG ИМЯ` и замена профиля на устройстве (раздел 6.6). Ключи REALITY, UUID клиентов и `seg-list` остаются прежними.
+  6. Повторите `-Check`: код 0. Проверьте подключение устройств (раздел 6.5).
+  7. Остановите старый шлюз, пока его ключ хоста ещё в `known_hosts`: `ssh root@СТАРЫЙ_IP "systemctl disable --now sing-box awg-quick@awg-backhaul"`, затем уничтожьте VPS у провайдера и удалите запись `ssh-keygen -R СТАРЫЙ_IP`. Пока старый шлюз работает, он принимает клиентов со старыми профилями и выпускает их неклассифицированный трафик со своего IP (страховочный выход).
 - **Переустановка ОС на том же IP:** `servers.txt` не меняется, но host key меняется: `ssh-keygen -R IP`, первый SSH-вход вручную со сверкой fingerprint, затем `sync-servers.ps1 -Mode SEG all` разворачивает узел заново с прежними секретами; профили клиентов остаются прежними.
 - **Узел недоступен по SSH:** `sync` останавливается до первого изменения (`UNREACHABLE` у недоступного узла, `SKIPPED` у второго), ничего не меняя; пара обрабатывается только целиком. Недоступность самого узла для клиентов (reboot, остановка backhaul или `sing-box`) не открывает трафик без VPS1: selected-запросы не проходят, адрес VPS2 не используется (fail-closed).
 - **Остановлен `sing-box`, потерян backhaul или таблица `seg_failclosed`:** `-Check` показывает `GATEWAY=DEGRADED` (или `FAIL_CLOSED=FAIL`) и завершается с кодом 2; `sync-servers.ps1 -Mode SEG all` возвращает службу, интерфейс или таблицу.
@@ -952,7 +1007,7 @@ Ping `seg-exit` по backhaul не проходит намеренно (в INPUT
 
 - **DNS клиента:** `sing-box` работает в TUN-режиме. Домены из `seg-list` получают от клиента FakeIP-адреса (`198.18.0.0/15`), а настоящий запрос идёт через VPS2 и backhaul на DNS-резолвер VPS1, без запасного варианта на локальный резолвер. Остальные домены резолвятся напрямую и настоящих адресов не подменяют. Прямой DNS клиента на Windows — только DoH/DoT (порт 53 при `strict_route` блокируется, в том числе для самого `sing-box`).
 - **Передача домена:** клиент передаёт на VPS2 доменное имя (VLESS destination = домен), а не IP, поэтому VPS2 сопоставляет ресурс по домену. Если ресурс из списка пришёл как IP, VPS2 восстанавливает домен по SNI (TLS, QUIC) и сверяет с `seg-list` по домену и CIDR.
-- **IPv4:** selected-трафик идёт только по IPv4 (для selected-доменов AAAA не выдаётся), пока IPv6-выход VPS1 не включён и не проверен. Прямой трафик клиента может использовать локальный IPv6. IPv6 для SEG пока не реализован; для его включения нужно отдельно настроить и проверить: backhaul IPv6, MTU backhaul не ниже 1280 (при `RandomTrailers = on` и `S4 = 144` это требует пересмотра `S4` или отказа от случайного хвоста), `AllowedIPs = ::/0` на VPS2, адрес VPS2-пира на VPS1, маршрутизацию selected-трафика на VPS2, маршрутизацию на VPS1, fail-closed и DNS strategy.
+- **IPv4 и IPv6:** профиль задаёт `dns.strategy = ipv4_only` и TUN только с IPv4-адресом. Проверено: AAAA для selected-доменов клиенту не выдаётся, selected-трафик идёт только по IPv4, пока IPv6-выход VPS1 не включён и не проверен. Не проверено (на тестовом канале IPv6 не было): AAAA для обычных доменов (поле глобальное, поэтому ожидается тот же результат) и поведение соединений по готовому IPv6-адресу без DNS: оно зависит от платформы и `strict_route` (по документации `sing-box` сеть, которую TUN не поддерживает, делается недоступной). Не рассчитывайте на «прямой IPv6» у клиента SEG без проверки на своём устройстве. IPv6 для SEG пока не реализован; для его включения нужно отдельно настроить и проверить: backhaul IPv6, MTU backhaul не ниже 1280 (при `RandomTrailers = on` и `S4 = 144` это требует пересмотра `S4` или отказа от случайного хвоста), `AllowedIPs = ::/0` на VPS2, адрес VPS2-пира на VPS1, маршрутизацию selected-трафика на VPS2, маршрутизацию на VPS1, fail-closed и DNS strategy.
 - **QUIC (UDP/443)** к ресурсам из списка отклоняется, чтобы браузер перешёл на TCP.
 - **Несовместимость:** клиент SEG (TUN) нельзя запускать вместе с активным full-tunnel клиентом AmneziaWG (kill-switch блокирует прямой трафик): на время работы SEG его отключают.
 
@@ -1021,7 +1076,7 @@ Ping `seg-exit` по backhaul не проходит намеренно (в INPUT
 
 ### 12.5. Синхронизация
 
-Локальные клиентские профили один раз за запуск приводятся к `server.env` (серверный `PublicKey`, DNS, все AWG-параметры; `Endpoint` не меняется). Если хотя бы один профиль изменился, все производные профили в `clients/generated/` удаляются как устаревшие — их нужно создать заново `make-client-config.ps1 -Mode VPN`. Затем скрипт сверяет `Endpoint` всех профилей с `servers.txt` и выводит предупреждение (`WARN`), если постоянный профиль указывает на адрес, которого нет в `servers.txt`, или на отключённый сервер, а производный профиль не совпадает с адресом своего сервера или относится к серверу, которого уже нет. Предупреждение ничего не исправляет и не останавливает синхронизацию. Если всё совпадает, выводится `Client profile endpoints match servers.txt`. Пустой список peer является допустимым состоянием для `READY`/`DEGRADED` и позволяет, в частности, синхронизировать удаление последнего клиента. Для каждого VPS формируется индивидуальный `awg0.conf` с его `ListenPort`.
+Локальные клиентские профили один раз за запуск приводятся к `server.env` (серверный `PublicKey`, DNS, все AWG-параметры; `Endpoint` не меняется). Если хотя бы один профиль изменился, все производные профили AmneziaWG (`*.conf` в `clients/generated/<клиент>/`) удаляются как устаревшие — их нужно создать заново `make-client-config.ps1 -Mode VPN`. Профили режима SEG (`clients/generated/seg/*.json` и `*.meta.json`) этим не затрагиваются: режим VPN удаляет только файлы `*.conf`. Затем скрипт сверяет `Endpoint` всех профилей с `servers.txt` и выводит предупреждение (`WARN`), если постоянный профиль указывает на адрес, которого нет в `servers.txt`, или на отключённый сервер, а производный профиль не совпадает с адресом своего сервера или относится к серверу, которого уже нет. Предупреждение ничего не исправляет и не останавливает синхронизацию. Если всё совпадает, выводится `Client profile endpoints match servers.txt`. Пустой список peer является допустимым состоянием для `READY`/`DEGRADED` и позволяет, в частности, синхронизировать удаление последнего клиента. Для каждого VPS формируется индивидуальный `awg0.conf` с его `ListenPort`.
 
 Для сервера в состоянии `READY` скрипт спрашивает «Выполнить синхронизацию с локальной конфигурацией?». При «да» конфигурация передаётся во временный `/root/.amnezia-sync` и сравнивается с боевой. Если отличий нет, ничего не меняется. Если есть, спрашивает «Применить изменения?»: при «нет» сервер получает статус `SKIPPED` и ничего не применяется. При изменении `awg0.conf` интерфейс `awg0` полностью перезапускается, чтобы гарантированно применить ключ, порт и все AWG-параметры; временные файлы после операции удаляются.
 
