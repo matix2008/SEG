@@ -486,7 +486,7 @@ function Resolve-SingBoxExecutable {
 # ============================================================
 # Remote nodes: SSH, copy, reboot, upgrade
 # Every connection uses BatchMode and StrictHostKeyChecking=yes: the host key of a node must be
-# verified and stored in known_hosts by the user beforehand (README, section 5).
+# verified and stored in known_hosts by the user beforehand (README, sections 5.2 and 12.4).
 # ============================================================
 
 function Write-LogOutput {

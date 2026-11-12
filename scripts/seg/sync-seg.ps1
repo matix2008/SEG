@@ -8,7 +8,8 @@ param(
 
 # SEG mode of sync-servers.ps1: converges the seg-gateway / seg-exit pair (roadmap, items 12 and 27).
 # The pair is one unit: only the target "all" is supported and a failure stops the remaining nodes.
-# Implemented stages: local validation, SSH, upgrade. The remaining stages are added by roadmap items 13-28.
+# Stages: local validation, SSH, upgrade, bootstrap, hardening, snapshot, fail-closed, routing, backhaul, egress,
+# sing-box and the final check (README, section 10); -Check only reads.
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
