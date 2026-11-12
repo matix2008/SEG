@@ -1,6 +1,6 @@
 # SEG — Selective Egress Gateway
 
-**Версия продукта: 1.3**
+**Версия продукта: 1.4**
 
 Выборочная маршрутизация трафика устройства: выбранные ресурсы выходят в Интернет через узел `seg-exit`, остальной трафик идёт напрямую. Дополнительный режим проекта — управление несколькими AmneziaWG-серверами (раздел 12).
 
@@ -317,7 +317,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\generate-server-en
 
 **Цель:** развернуть рабочую серверную пару.
 
-Сначала проверка без изменений (до развёртывания она покажет `EXIT=NEW` и код 2: это нормально):
+Сначала проверка без изменений. На чистых узлах она покажет `GATEWAY=NEW`, `EXIT=NEW`, `BACKHAUL=DOWN`, `FAIL_CLOSED=FAIL`, `SECURITY=FAIL` (вход по паролю и root, UFW выключен, Fail2Ban не работает), предупреждение «There are no enabled SEG clients» и код 2: для ещё не развёрнутой пары это нормально. Главное в этой проверке — что SSH к обоим узлам установлен и `servers.txt`, `seg.env`, `seg-list.json` и пакет `sing-box` прошли проверку:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-servers.ps1 -Mode SEG all -Check
