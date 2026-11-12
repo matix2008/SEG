@@ -275,6 +275,9 @@ done
 
 systemctl is-active --quiet fail2ban 2>/dev/null || problems+=("fail2ban-inactive")
 
+journald_max="$(systemd-analyze cat-config systemd/journald.conf 2>/dev/null | grep -E '^SystemMaxUse=' | tail -1 | cut -d= -f2)"
+[[ "$journald_max" == "200M" ]] || problems+=("journald-limit")
+
 if [[ "${#problems[@]}" -eq 0 ]]; then
     echo "CHECK SECURITY=OK"
 else

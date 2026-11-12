@@ -143,6 +143,28 @@ systemctl reload ssh
 log OK "SSH configuration validated and reloaded."
 
 # ------------------------------------------------------------
+# journald: bounded disk usage
+# ------------------------------------------------------------
+
+log INFO "Limiting the systemd journal size."
+JOURNALD_DROPIN="/etc/systemd/journald.conf.d/00-seg.conf"
+JOURNALD_WANTED="$(printf '%s\n' \
+    '[Journal]' \
+    'SystemMaxUse=200M' \
+    'SystemKeepFree=2G' \
+    'MaxRetentionSec=1month')"
+
+if [[ "$(cat "$JOURNALD_DROPIN" 2>/dev/null)" == "$JOURNALD_WANTED" ]]; then
+    log OK "journald limits are already in place."
+else
+    mkdir -p /etc/systemd/journald.conf.d
+    printf '%s\n' "$JOURNALD_WANTED" >"$JOURNALD_DROPIN"
+    chmod 644 "$JOURNALD_DROPIN"
+    systemctl restart systemd-journald
+    log OK "journald limits applied (SystemMaxUse=200M, SystemKeepFree=2G, MaxRetentionSec=1month)."
+fi
+
+# ------------------------------------------------------------
 # Fail2Ban and automatic updates
 # ------------------------------------------------------------
 

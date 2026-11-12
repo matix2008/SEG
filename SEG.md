@@ -896,7 +896,7 @@ SECURITY
 ```text
 1. Upgrade.
 2. Установка пакетов и подготовка роли (`bootstrap-seg.sh`).
-3. Hardening (`secure-seg.sh`).
+3. Hardening (`secure-seg.sh`): SSH по ключам, лимит журнала journald (`SystemMaxUse=200M`, `SystemKeepFree=2G`, `MaxRetentionSec=1month`), Fail2Ban, UFW. Серверный `sing-box` пишет журнал на уровне `warn` (соединения клиентов не хранятся); `-Check` в `SECURITY` сообщает `journald-limit`, если лимита нет.
 4. Снимок состояния узлов для отката (`apply-seg.sh snapshot`).
 5. Fail-closed VPS2.
 6. Маршрутизация selected-трафика VPS2 (`bind_interface`, `rp_filter`, MTU).
