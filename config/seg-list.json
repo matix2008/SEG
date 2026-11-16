@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "groups": [
     {
       "name": "google",
@@ -42,7 +42,8 @@
         "t.me",
         "telegram.me",
         "telegra.ph",
-        "tdesktop.com"
+        "tdesktop.com",
+        "telegram-cdn.org"
       ],
       "cidrs": [
         "91.108.56.0/22",
@@ -147,7 +148,8 @@
         "default.exp-tas.com"
       ],
       "domain_suffixes": [
-        "githubcopilot.com"
+        "githubcopilot.com",
+        "exp-tas.com"
       ],
       "cidrs": [],
       "sources": [
@@ -426,6 +428,278 @@
       "cidrs": [],
       "sources": [
         "https://help.openai.com/en/articles/9247338-network-recommendations-for-chatgpt-errors-on-web-and-apps"
+      ]
+    },
+    {
+      "name": "grok",
+      "title": "Grok / xAI",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "grok.com",
+        "x.ai"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "vscode",
+      "title": "VS Code",
+      "enabled": true,
+      "domains": [
+        "update.code.visualstudio.com",
+        "code.visualstudio.com",
+        "marketplace.visualstudio.com",
+        "vscode.download.prss.microsoft.com",
+        "download.visualstudio.microsoft.com",
+        "vscode-sync.trafficmanager.net"
+      ],
+      "domain_suffixes": [
+        "vsassets.io",
+        "vscode.dev",
+        "vscode-cdn.net"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "discord",
+      "title": "Discord",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "discord.com",
+        "discord.gg",
+        "discordapp.com",
+        "discordapp.net"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "spotify",
+      "title": "Spotify",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "spotify.com",
+        "scdn.co",
+        "spotifycdn.com"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "twitch",
+      "title": "Twitch",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "twitch.tv",
+        "twitchcdn.net",
+        "jtvnw.net"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "tiktok",
+      "title": "TikTok",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "tiktok.com",
+        "tiktokcdn.com",
+        "ttwstatic.com"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "whatsapp",
+      "title": "WhatsApp Web",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "whatsapp.com",
+        "whatsapp.net"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "notion",
+      "title": "Notion",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "notion.so",
+        "notion.com",
+        "notion.site",
+        "notion-static.com",
+        "notionusercontent.com"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "kinozal",
+      "title": "Kinozal",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "kinozal.guru",
+        "kinozal.me"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "rutracker",
+      "title": "RuTracker",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "rutracker.org"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "rutor",
+      "title": "RuTor",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "rutor.info"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "meduza",
+      "title": "Meduza",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "meduza.io"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "censoru",
+      "title": "Censoru",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "censoru.net"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "gordonua",
+      "title": "GordonUA",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "gordonua.com"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "takiedela",
+      "title": "Такие дела",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "takiedela.ru"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "moscow-times",
+      "title": "The Moscow Times",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "themoscowtimes.com"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "svoboda",
+      "title": "Радио Свобода",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "svoboda.org"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "dw-russian",
+      "title": "DW Russian",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "dw.com"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
+      ]
+    },
+    {
+      "name": "novaya-gazeta-europe",
+      "title": "Новая газета Европа",
+      "enabled": true,
+      "domains": [],
+      "domain_suffixes": [
+        "novayagazeta.eu"
+      ],
+      "cidrs": [],
+      "sources": [
+        "seg-list-v2.json от 2026-11-16 (проба seg-access.log, ручная правка групп)"
       ]
     }
   ]
