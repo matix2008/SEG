@@ -955,7 +955,7 @@ SECURITY
 Режим VPN остаётся прежним. Режим SEG реализуется отдельными файлами, а `-Mode` служит единой точкой входа:
 
 ```text
-scripts\seg\*.ps1       SEG-логика (sync, клиенты, профили)
+scripts\seg\*.ps1       SEG-логика (sync, клиенты, профили, status-seg.ps1: состояние узлов и адреса клиентов, только чтение)
 scripts\lib\common.ps1  общие функции SEG-скриптов: журнал, подтверждения, awg, случайные значения, backup файлов env, сверка SHA-256 пакетов sing-box
 seg\sing-box.sha256     SHA-256 пакетов sing-box 1.14.4 и файлов в них
 scripts\lib\servers.ps1 загрузчик servers.txt (разбор, валидация, выбор по режиму, миграция); используется и VPN-, и SEG-скриптами
@@ -963,7 +963,7 @@ scripts\lib\segenv.ps1  загрузчик и валидатор config/seg.env 
 scripts\lib\seglist.ps1 загрузчик и валидатор config/seg-list.json, SHA-256, генерация rule_set (SEG-скрипты)
 scripts\lib\segclients.ps1 хранение SEG-клиентов (clients\seg), пользователи VLESS для VPS2, метаданные профилей (SEG-скрипты)
 scripts\lib\segprofile.ps1 клиентский профиль: подстановка шаблона, структурная проверка, sing-box check (SEG-скрипты)
-seg\*.sh                bootstrap-seg.sh, secure-seg.sh, apply-seg.sh (этапы настройки узлов с откатом: failclosed, routing, backhaul, egress, singbox), check-backhaul.sh (проверка backhaul, только чтение), check-node.sh (состояние узла, только чтение)
+seg\*.sh                bootstrap-seg.sh, secure-seg.sh, apply-seg.sh (этапы настройки узлов с откатом: failclosed, routing, backhaul, egress, singbox), check-backhaul.sh (проверка backhaul, только чтение), check-node.sh (состояние узла, только чтение; включает ресурсы DISK, MEMORY, JOURNAL с порогами 75% диска, 15% доступной памяти, 180 МБ journald и 300 МБ `/var/log`), status-node.sh (состояние узла и адреса клиентов, только чтение)
 seg\templates\*         шаблоны {{VAR}} конфигураций SEG (backhaul, nftables, unbound, sing-box, systemd)
 ```
 

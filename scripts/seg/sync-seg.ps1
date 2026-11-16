@@ -610,6 +610,28 @@ function Invoke-SegCheckReport {
         SECURITY         = $(if ($gatewayCheck.Security -eq 'OK' -and $exitCheck.Security -eq 'OK') { 'OK' } else { "FAIL (gateway: $($gatewayCheck.Security); exit: $($exitCheck.Security))" })
     }
 
+    # Resources of the nodes (disk, memory, logs): reported always, a problem only in -Check (the final check of
+    # a synchronization must not fail because of a full disk that the synchronization cannot fix).
+    $resourceWarnings = @{}
+
+    foreach ($resourceName in @('DISK', 'MEMORY', 'JOURNAL')) {
+        $details = @()
+        $warn = $false
+
+        foreach ($pair in @(@('gateway', $gatewayCheck), @('exit', $exitCheck))) {
+            $nodeValue = Get-ReportValue $pair[1].Values $resourceName
+
+            if ($nodeValue -like 'WARN*') {
+                $warn = $true
+                $resourceWarnings["$($pair[1].Node.Name)|$resourceName"] = $nodeValue
+            }
+
+            $details += "$($pair[0]): $($nodeValue -replace '^(OK|WARN) ', '')$(if ($nodeValue -like 'WARN*') { ' [over the threshold]' })"
+        }
+
+        $report[$resourceName] = "$(if ($warn) { 'WARN' } else { 'OK' }) ($($details -join '; '))"
+    }
+
     # What a healthy pair looks like (roadmap, item 26); anything else is a problem of the pair.
     $pairProblems = @()
 
@@ -623,7 +645,7 @@ function Invoke-SegCheckReport {
 
     foreach ($key in $report.Keys) {
         $value = [string]$report[$key]
-        $level = if ($value -in @('READY', 'UP', 'OK') -or $value -like 'FRESH*' -or $key -in @('SEG_LIST_VERSION', 'SEG_LIST_HASH')) { 'OK' } elseif ($key -eq 'UNMATCHED_DIRECT') { 'INFO' } elseif ($key -eq 'EGRESS_IP' -and $value -eq [string]$Exit.IP) { 'OK' } else { 'WARN' }
+        $level = if ($value -in @('READY', 'UP', 'OK') -or $value -like 'FRESH*' -or $value -like 'OK (*' -or $key -in @('SEG_LIST_VERSION', 'SEG_LIST_HASH')) { 'OK' } elseif ($key -eq 'UNMATCHED_DIRECT') { 'INFO' } elseif ($key -eq 'EGRESS_IP' -and $value -eq [string]$Exit.IP) { 'OK' } else { 'WARN' }
 
         Write-Log -Level $level -Message "$key=$value"
     }
@@ -643,6 +665,12 @@ function Invoke-SegCheckReport {
 
         if ($checked.Security -ne 'OK') { $parts += "security: $($checked.Security)" }
 
+        if ($Check) {
+            foreach ($resourceName in @('DISK', 'MEMORY', 'JOURNAL')) {
+                $key = "$($checked.Node.Name)|$resourceName"
+                if ($resourceWarnings.ContainsKey($key)) { $parts += "resources: $($resourceName.ToLowerInvariant()) $($resourceWarnings[$key])" }
+            }
+        }
         if ($checked.Node.Role -eq 'seg-gateway') { $parts += $pairProblems }
 
         $nodeResults += [pscustomobject]@{

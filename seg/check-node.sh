@@ -241,6 +241,37 @@ else
 fi
 
 # ------------------------------------------------------------
+# Resources: disk, memory, logs (the same thresholds as status-node.sh)
+# ------------------------------------------------------------
+
+DISK_WARN_PERCENT=75
+MEMORY_WARN_AVAILABLE_PERCENT=15
+JOURNAL_WARN_BYTES=$((180 * 1024 * 1024))
+VARLOG_WARN_BYTES=$((300 * 1024 * 1024))
+
+disk_used="$(df -P / | awk 'NR == 2 { gsub("%", "", $5); print $5 }')"
+disk_free="$(df -Ph / | awk 'NR == 2 { print $4 }')"
+inode_used="$(df -Pi / | awk 'NR == 2 { gsub("%", "", $5); print $5 }')"
+disk_state=OK
+{ [[ "${disk_used:-0}" -ge "$DISK_WARN_PERCENT" ]] || [[ "${inode_used:-0}" =~ ^[0-9]+$ && "$inode_used" -ge "$DISK_WARN_PERCENT" ]]; } && disk_state=WARN
+echo "CHECK DISK=${disk_state} used=${disk_used}% free=${disk_free} inodes=${inode_used:--}%"
+
+mem_total_kb="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+mem_available_kb="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
+mem_available_percent=$(( mem_available_kb * 100 / mem_total_kb ))
+mem_state=OK
+[[ "$mem_available_percent" -lt "$MEMORY_WARN_AVAILABLE_PERCENT" ]] && mem_state=WARN
+echo "CHECK MEMORY=${mem_state} available=${mem_available_percent}% ($((mem_available_kb / 1024)) MB of $((mem_total_kb / 1024)) MB)"
+
+journal_bytes="$(du -sb /var/log/journal 2>/dev/null | awk '{ print $1 }')"
+varlog_bytes="$(du -sxb /var/log 2>/dev/null | awk '{ print $1 }')"
+journal_bytes="${journal_bytes:-0}"
+varlog_bytes="${varlog_bytes:-0}"
+journal_state=OK
+{ [[ "$journal_bytes" -ge "$JOURNAL_WARN_BYTES" ]] || [[ "$varlog_bytes" -ge "$VARLOG_WARN_BYTES" ]]; } && journal_state=WARN
+echo "CHECK JOURNAL=${journal_state} journal=$(numfmt --to=iec "$journal_bytes") varlog=$(numfmt --to=iec "$varlog_bytes")"
+
+# ------------------------------------------------------------
 # Security: SSH key only, UFW with the rules of the role, Fail2Ban
 # ------------------------------------------------------------
 
