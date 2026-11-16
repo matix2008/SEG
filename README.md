@@ -1,6 +1,6 @@
 # SEG — Selective Egress Gateway
 
-**Версия продукта: 1.8**
+**Версия продукта: 1.9**
 
 Выборочная маршрутизация трафика устройства: выбранные ресурсы выходят в Интернет через узел `seg-exit`, остальной трафик идёт напрямую. Дополнительный режим проекта — управление несколькими AmneziaWG-серверами (раздел 12).
 
@@ -509,7 +509,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mo
 
 Профиль нужно пересоздавать и менять на устройстве, когда `-Check` или `make-client-config.ps1 -Mode SEG` показывает `STALE` (раздел 8.4): после изменения `seg-list.json`, смены адреса или порта VPS2, ротации ключей REALITY.
 
-1. На управляющем компьютере: `make-client-config.ps1 -Mode SEG ИМЯ` (подтвердите «Create the profile?»). Новый профиль для переноса на устройство — `clients\generated\seg\ИМЯ.json` (запись клиента в `clients\seg\` не меняется и на устройство не переносится). Для Android заново сделайте копию в `clients\mobile\` (раздел 6.4, шаг 2).
+1. На управляющем компьютере: `make-client-config.ps1 -Mode SEG ИМЯ` (подтвердите «Create the profile?») или сразу для всех устаревших профилей `make-client-config.ps1 -Mode SEG -All` (один вопрос «Recreate N profile(s)»). Новый профиль для переноса на устройство — `clients\generated\seg\ИМЯ.json` (запись клиента в `clients\seg\` не меняется и на устройство не переносится). Для Android заново сделайте копию в `clients\mobile\` (раздел 6.4, шаг 2).
 2. Остановите клиент на устройстве, замените файл профиля (Android: удалите старый профиль в приложении и импортируйте новый), запустите клиент.
 3. Повторите проверку раздела 6.5.
 
@@ -535,7 +535,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mo
 ### 7.1. Обновить профиль
 
 - **Условия:** `-Check` или `make-client-config.ps1 -Mode SEG` показывает для клиента `STALE` (раздел 8.4).
-- **На управляющем компьютере:** если причина — изменение серверных параметров, сначала примените их: `sync-servers.ps1 -Mode SEG all`; затем `make-client-config.ps1 -Mode SEG ИМЯ` (подтвердить «Create the profile?»).
+- **На управляющем компьютере:** если причина — изменение серверных параметров, сначала примените их: `sync-servers.ps1 -Mode SEG all`; затем `make-client-config.ps1 -Mode SEG ИМЯ` (подтвердить «Create the profile?») или `make-client-config.ps1 -Mode SEG -All` для всех клиентов сразу.
 - **На устройстве:** остановить клиент, заменить профиль, запустить (раздел 6.6).
 - **Ожидание:** `make-client-config.ps1 -Mode SEG ИМЯ` показывает `current`, проверки 6.5 проходят.
 
@@ -591,7 +591,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\add-client.ps1 -Mo
 2. Проверьте файл: `powershell -NoProfile -Command ". .\scripts\lib\seglist.ps1; Read-SegList .\config\seg-list.json | Format-List Version,Sha256,EnabledGroups"`. Валидатор сообщает обо всех ошибках сразу.
 3. `sync-servers.ps1 -Mode SEG all -Check`: `GATEWAY=CHANGES`, у клиентов `STALE` (код 2).
 4. `sync-servers.ps1 -Mode SEG all`: серверный `sing-box` получает новые правила и перезапускается.
-5. Для **каждого** включённого клиента `make-client-config.ps1 -Mode SEG ИМЯ` (для Android заново сделайте копию в `clients\mobile\`, раздел 6.4).
+5. Пересоздайте профили включённых клиентов одной командой `make-client-config.ps1 -Mode SEG -All` (один вопрос «Recreate N profile(s)»; для одного клиента: `make-client-config.ps1 -Mode SEG ИМЯ`). Для Android заново сделайте копию в `clients\mobile\` (раздел 6.4).
 6. Замените профили на устройствах (раздел 6.6).
 7. Проверьте **именно изменённый хост** с устройства: откройте его (например, страницу на `githubassets.com`) и найдите его в журнале клиента (Windows и Linux — `client-tun.log`, Android — вкладка Log). После добавления в список соединение должно идти через выход `seg` (`outbound/vless[seg]`), после исключения — через `direct` (`outbound/direct`). Проверки раздела 6.5 по другим ресурсам актуальность всего профиля не подтверждают: устаревший профиль может пройти их успешно.
 
@@ -912,7 +912,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\remove-client.ps1 
 Синтаксис (`[ ]` — необязательный элемент; блок не предназначен для копирования):
 
 ```text
-make-client-config.ps1 -Mode SEG [ИМЯ]
+make-client-config.ps1 -Mode SEG [ИМЯ | -All]
 make-client-config.ps1 -Mode VPN [ИМЯ] [СЕРВЕР]
 ```
 
@@ -920,12 +920,14 @@ make-client-config.ps1 -Mode VPN [ИМЯ] [СЕРВЕР]
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode SEG laptop-anna
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode SEG -All
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make-client-config.ps1 -Mode VPN laptop-anna vpn-01
 ```
 
 - **SEG:** создаёт или пересоздаёт профиль `clients/generated/seg/ИМЯ.json` и `ИМЯ.meta.json`. Перед запросом имени выводит состояние профилей всех клиентов (раздел 8.4). Профиль строится из шаблона, `seg.env`, `seg-list.json`, `servers.txt` и UUID, проверяется (структура и `sing-box check`) и записывается через временные файлы. Устаревший, отсутствующий и повреждённый профиль создаётся после «Create the profile?»; актуальный пересоздаётся только после «The profile is current. Recreate it anyway?» (по умолчанию «нет»: файл не меняется, код 0). Для отключённого клиента — ошибка (сначала включите клиента, раздел 7.2).
+- **SEG, `-All`:** пересоздаёт профили всех **включённых** клиентов, которые не `CURRENT` (`STALE`, `MISSING`, `BROKEN`), после одного вопроса «Recreate N profile(s): …?». Актуальные и отключённые клиенты пропускаются; если пересоздавать нечего, скрипт сообщает об этом (код 0). Ошибка у одного клиента не мешает остальным: он получает `ERROR`, итоговый код `1`. С именем клиента `-All` не сочетается (ошибка), в режиме VPN `-All` не существует (ошибка, код 1). Скрипт напоминает, какие файлы `clients\generated\seg\ИМЯ.json` передать на устройства и для каких клиентов есть копии для Android в `clients\mobile\` (их нужно сделать заново, раздел 6.4: скрипт их не обновляет).
 - **VPN:** создаёт производный профиль `clients/generated/ИМЯ/СЕРВЕР.conf`, меняя только `Endpoint`; работает только с включёнными серверами из `servers.txt`.
-- **Серверы:** не затрагивает. Профиль нужно пересоздавать для каждого клиента отдельно.
+- **Серверы:** не затрагивает. После изменения серверных параметров или `seg-list.json` сначала выполняется `sync`, потом пересоздаются профили (одним `-All` или по одному).
 
 ### 9.6. `sync-servers.ps1`
 

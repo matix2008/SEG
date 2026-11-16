@@ -3,11 +3,15 @@ param(
     [string]$ClientName,
 
     [Parameter(Mandatory = $false, Position = 1)]
-    [string]$ServerName
+    [string]$ServerName,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$All
 )
 
 # SEG mode of make-client-config.ps1 (roadmap, item 25): (re)creates the profile of an existing client,
-# clients\generated\seg\<name>.json with its metadata. The profile is a complete sing-box 1.14.4 configuration
+# clients\generated\seg\<name>.json with its metadata. -All recreates every profile of the enabled clients that is
+# not current (STALE, MISSING, BROKEN) after one confirmation. The profile is a complete sing-box 1.14.4 configuration
 # built from the template, seg.env, seg-list.json, servers.txt and the UUID of the client; it is verified before
 # it is written. Nothing on the VPS changes.
 
@@ -61,8 +65,71 @@ foreach ($item in $Clients) {
     }
 }
 
-if (-not $ClientName) {
+if ($All -and $ClientName) {
+    throw 'The -All switch recreates the profiles of all clients: do not give a client name with it.'
+}
+
+if (-not $All -and -not $ClientName) {
     $ClientName = ([string](Read-Host 'Client name')).Trim()
+}
+
+if ($All) {
+    $targets = @()
+
+    foreach ($item in $Clients) {
+        if (-not $item.Enabled) { continue }
+
+        $itemStatus = Get-SegProfileStatus -Root $Root -Client $item -SegList $Context.SegList -Env $Context.Env -Gateway $Context.Gateway
+
+        if ($itemStatus.State -ne 'CURRENT') {
+            $targets += [pscustomobject]@{ Client = $item; Before = $itemStatus.State }
+        }
+    }
+
+    if ($targets.Count -eq 0) {
+        Write-Log -Level 'DONE' -Message 'All profiles of the enabled clients are current: nothing to recreate.'
+        exit 0
+    }
+
+    if (-not (Confirm-Action "Recreate $($targets.Count) profile(s): $(($targets | ForEach-Object { $_.Client.Name }) -join ', ')?")) {
+        Write-Log -Level 'DONE' -Message 'CANCELLED.'
+        exit 0
+    }
+
+    $failed = 0
+    $done = @()
+
+    foreach ($target in $targets) {
+        try {
+            $paths = Save-SegClientProfile -Root $Root -Client $target.Client -Context $Context
+            Write-Log -Level 'OK' -Message "Client $($target.Client.Name): profile recreated ($($target.Before) -> CURRENT): $($paths.Profile)"
+            $done += $target.Client.Name
+        }
+        catch {
+            $failed++
+            Write-Log -Level 'ERROR' -Message "Client $($target.Client.Name): the profile was not recreated: $(Get-ErrorDescription -ErrorRecord $_)"
+        }
+    }
+
+    if ($done.Count -gt 0) {
+        Write-Log -Level 'WARN' -Message 'The profiles contain UUIDs: hand them over through a secure channel only. Replace on the devices: clients\generated\seg\<name>.json.'
+
+        $mobile = @($done | Where-Object { Test-Path -LiteralPath (Join-Path $Root "clients\mobile\$_-mobile.json") })
+
+        if ($mobile.Count -gt 0) {
+            Write-Log -Level 'WARN' -Message "Android copies exist for: $($mobile -join ', '). Make them again from the new profiles (README, section 6.4): clients\mobile is not updated by this script."
+        }
+
+        Write-Log -Level 'WARN' -Message 'Run sync-servers.ps1 -Mode SEG all if it was not run since the last change of seg-list.json, seg.env or servers.txt: VPS2 must know the current settings.'
+    }
+
+    if ($failed -gt 0) {
+        Write-Log -Level 'DONE' -Message "Completed with errors: $failed profile(s) not recreated. Log: $($script:LogFile)"
+        exit 1
+    }
+
+    Write-Log -Level 'DONE' -Message "SUCCESS: $($done.Count) profile(s) recreated. Log: $($script:LogFile)"
+    exit 0
 }
 
 # The name goes into file paths: it must be valid before it is used.

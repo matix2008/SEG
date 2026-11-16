@@ -7,7 +7,10 @@
     [string]$ClientName,
 
     [Parameter(Mandatory = $false, Position = 1)]
-    [string]$ServerName
+    [string]$ServerName,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$All
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +18,11 @@ Set-StrictMode -Version Latest
 
 if (-not $PSBoundParameters.ContainsKey('Mode')) {
     [Console]::Error.WriteLine('ERROR: parameter -Mode is required. Use -Mode VPN or -Mode SEG.')
+    exit 1
+}
+
+if ($Mode -eq 'VPN' -and $All) {
+    [Console]::Error.WriteLine('ERROR: the -All switch exists only in -Mode SEG.')
     exit 1
 }
 
